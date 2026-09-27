@@ -1,8 +1,44 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-mode=${GKSDUD_SIGN_MODE:-local}
+mode=${GKSDUD_SIGN_MODE:-auto}
 sign_args=()
+if [[ "$mode" == auto || "$mode" == developer-id ]]; then
+  if [[ -z "${GKSDUD_SIGN_IDENTITY:-}" ]]; then
+    identities=$(security find-identity -v -p codesigning) || {
+      echo 'Unable to read code signing identities from the keychain.' >&2
+      exit 1
+    }
+    fingerprints=()
+    identity_names=()
+    identity_pattern='^[[:space:]]*[0-9]+\)[[:space:]]+([A-Fa-f0-9]{40})[[:space:]]+"(Developer ID Application: [^"]+)"$'
+    while IFS= read -r line; do
+      if [[ "$line" =~ $identity_pattern ]]; then
+        fingerprints+=("${BASH_REMATCH[1]}")
+        identity_names+=("${BASH_REMATCH[2]}")
+      fi
+    done <<< "$identities"
+    case ${#fingerprints[@]} in
+      0)
+        if [[ "$mode" == auto && -f signing/local-certificate.pem ]]; then
+          mode=local
+        else
+          echo 'No valid Developer ID Application identity found. Set GKSDUD_SIGN_IDENTITY to your certificate name or SHA-1, or use GKSDUD_SIGN_MODE=local / ad-hoc.' >&2
+          exit 1
+        fi
+        ;;
+      1) GKSDUD_SIGN_IDENTITY=${fingerprints[0]} ;;
+      *)
+        echo 'Multiple Developer ID Application identities found. Set GKSDUD_SIGN_IDENTITY to the certificate name or SHA-1 to use:' >&2
+        for ((i=0; i<${#fingerprints[@]}; i++)); do
+          printf '  %s  "%s"\n' "${fingerprints[i]}" "${identity_names[i]}" >&2
+        done
+        exit 1
+        ;;
+    esac
+  fi
+  [[ "$mode" != auto ]] || mode=developer-id
+fi
 case "$mode" in
   local)
     [[ -f signing/local-certificate.pem ]] || { echo 'Missing fixed signing certificate. Run signing/setup-local-signing.sh first.' >&2; exit 1; }
@@ -18,8 +54,9 @@ case "$mode" in
     echo 'WARNING: ad-hoc signing does not preserve app identity across updates.' >&2
     sign_args=(--sign - --timestamp=none)
     ;;
-  *) echo 'GKSDUD_SIGN_MODE must be local, developer-id, or ad-hoc' >&2; exit 1 ;;
+  *) echo 'GKSDUD_SIGN_MODE must be auto, local, developer-id, or ad-hoc' >&2; exit 1 ;;
 esac
+printf 'Signing mode: %s; identity: %s\n' "$mode" "${sign_args[1]}"
 output_dir=${GKSDUD_OUTPUT_DIR:-"$PWD/outputs"}
 stage=$(mktemp -d /private/tmp/gksdud-build.XXXXXX)
 mkdir -p "$stage/gksdud.app/Contents/MacOS" "$stage/gksdud.app/Contents/Resources" "$output_dir"

@@ -16,7 +16,19 @@ PR 제목에는 `[FEAT]`, `[FIX]`, `[CHORE]`, `[DOCS]`, `[REFACTOR]`, `[TEST]`, 
 
 ## 개발 환경과 빌드
 
-Xcode Command Line Tools가 설치된 macOS에서 빌드합니다. 외부 패키지는 필요하지 않습니다.
+Xcode Command Line Tools가 설치된 macOS에서 빌드합니다. Xcode 프로젝트 없이 `swiftc`를 사용하며 외부 패키지는 필요하지 않습니다.
+
+```sh
+bash build.sh
+```
+
+기본 `auto` 모드는 키체인의 유효한 `Developer ID Application` 인증서가 하나이면 자동으로 사용합니다. 여러 개이면 인증서 이름 또는 SHA-1을 지정해야 합니다. 다른 코드 서명 인증서도 직접 지정할 수 있습니다.
+
+```sh
+GKSDUD_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' bash build.sh
+```
+
+Developer ID 인증서가 없으면 기존 `signing/local-certificate.pem`을 사용합니다. 자체 서명을 명시하려면 `GKSDUD_SIGN_MODE=local`을 지정하며, 기존 인증서 설정은 `bash signing/setup-local-signing.sh`로 준비합니다. 인증서 없이 개발 빌드를 만들려면:
 
 ```sh
 GKSDUD_SIGN_MODE=ad-hoc bash build.sh

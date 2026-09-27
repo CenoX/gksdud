@@ -231,7 +231,7 @@ extension AppDelegate {
         return url
     }
     @objc func openSupport() { if let url = supportURL { NSWorkspace.shared.open(url) } }
-    @objc func openProject() { NSWorkspace.shared.open(URL(string: "https://github.com/codingnoye/gksdud")!) }
+    @objc func openProject() { NSWorkspace.shared.open(URL(string: "https://github.com/CenoX/gksdud")!) }
     func refreshUpdates() {
         let release = updates.available
         tabButtons.last?.image = release == nil ? tabGlyph("?") : updateGlyph(NSSize(width: 24, height: 20), color: .controlAccentColor)

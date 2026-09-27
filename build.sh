@@ -57,6 +57,19 @@ case "$mode" in
   *) echo 'GKSDUD_SIGN_MODE must be auto, local, developer-id, or ad-hoc' >&2; exit 1 ;;
 esac
 printf 'Signing mode: %s; identity: %s\n' "$mode" "${sign_args[1]}"
+notarize=${GKSDUD_NOTARIZE:-0}
+case "$notarize" in
+  0) ;;
+  1)
+    [[ "$mode" == developer-id ]] || { echo 'Notarization requires Developer ID signing.' >&2; exit 1; }
+    notary_args=(--keychain-profile "${GKSDUD_NOTARY_PROFILE:-gksdud}")
+    if [[ -n "${GKSDUD_NOTARY_KEYCHAIN:-}" ]]; then
+      notary_args+=(--keychain "$GKSDUD_NOTARY_KEYCHAIN")
+    fi
+    xcrun notarytool history "${notary_args[@]}" --output-format json >/dev/null
+    ;;
+  *) echo 'GKSDUD_NOTARIZE must be 0 or 1' >&2; exit 1 ;;
+esac
 output_dir=${GKSDUD_OUTPUT_DIR:-"$PWD/outputs"}
 stage=$(mktemp -d /private/tmp/gksdud-build.XXXXXX)
 mkdir -p "$stage/gksdud.app/Contents/MacOS" "$stage/gksdud.app/Contents/Resources" "$output_dir"
@@ -82,6 +95,22 @@ codesign --force "${sign_args[@]}" --options runtime "$stage/gksdud.app"
 codesign --verify --deep --strict "$stage/gksdud.app"
 "$stage/gksdud.app/Contents/MacOS/gksdud" --self-test
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$stage/gksdud.app/Contents/Info.plist")
-ditto -c -k --keepParent --norsrc "$stage/gksdud.app" "$output_dir/gksdud-$version-macos-universal.zip"
+if [[ "$notarize" == 1 ]]; then
+  ditto -c -k --keepParent --norsrc "$stage/gksdud.app" "$stage/notarization.zip"
+  echo 'Submitting app to Apple for notarization...'
+  if ! xcrun notarytool submit "$stage/notarization.zip" "${notary_args[@]}" --wait --timeout 20m --output-format json > "$stage/notarization.json"; then
+    echo "Notarization failed. Submission receipt: $stage/notarization.json" >&2
+    exit 1
+  fi
+  status=$(/usr/bin/plutil -extract status raw -o - "$stage/notarization.json")
+  [[ "$status" == Accepted ]] || { echo "Notarization status: $status. Submission receipt: $stage/notarization.json" >&2; exit 1; }
+  xcrun stapler staple "$stage/gksdud.app"
+  xcrun stapler validate "$stage/gksdud.app"
+  codesign --verify --all-architectures --strict "$stage/gksdud.app"
+  spctl --assess --type execute --verbose=2 "$stage/gksdud.app"
+fi
+# Repack after stapling; publish only a completely verified archive.
+ditto -c -k --keepParent --norsrc "$stage/gksdud.app" "$stage/distribution.zip"
+mv "$stage/distribution.zip" "$output_dir/gksdud-$version-macos-universal.zip"
 codesign -d -r- "$stage/gksdud.app"
 echo "Built app: $stage/gksdud.app"

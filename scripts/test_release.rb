@@ -148,7 +148,7 @@ class ReleaseTests < Minitest::Test
       File.write("#{dir}/gh", "#!/usr/bin/ruby\nrequire 'json'\nFile.write(ENV.fetch('CAPTURE'), JSON.generate(ARGV))\n")
       File.chmod(0755, "#{dir}/gh")
       env = metadata.outputs.transform_keys { |key| key.to_s.upcase }.transform_values(&:to_s)
-      env.merge!('PATH' => "#{dir}:#{ENV.fetch('PATH')}", 'GITHUB_REPOSITORY' => 'codingnoye/gksdud',
+      env.merge!('PATH' => "#{dir}:#{ENV.fetch('PATH')}", 'GITHUB_REPOSITORY' => 'CenoX/gksdud',
                  'SOURCE_ROOT' => 'release-source',
                  'CAPTURE' => "#{dir}/args.json")
       output, status = Open3.capture2e(env, '/bin/bash', '-c', step.fetch('run'), chdir: ROOT)
@@ -183,7 +183,7 @@ class ReleaseTests < Minitest::Test
     end
   end
 
-  def test_stable_publication_requires_explicit_dispatch_and_keeps_tap_in_actions
+  def test_fork_publication_requires_explicit_dispatch_and_never_updates_upstream_tap
     workflow = YAML.load_file("#{ROOT}/.github/workflows/release.yml")
     triggers = workflow.fetch('on') { workflow.fetch(true) }
     inputs = triggers.fetch('workflow_dispatch').fetch('inputs')
@@ -193,10 +193,13 @@ class ReleaseTests < Minitest::Test
     publish = steps.find { |step| step['name'] == 'Publish verified stable draft' }
     tap = steps.find { |step| step['name'] == 'Verify published assets and open Homebrew update PR' }
     assert_equal "github.event_name == 'workflow_dispatch' && steps.version.outputs.prerelease == 'false'", publish.fetch('if')
-    assert_equal publish.fetch('if'), tap.fetch('if')
+    assert_nil tap
+    assert_includes workflow.fetch('jobs').fetch('release').fetch('if'), "github.repository == 'CenoX/gksdud'"
     assert_operator steps.index(publish), :>, steps.index(steps.find { |step| step['id'] == 'existing' })
-    assert_operator steps.index(tap), :>, steps.index(publish)
-    assert_includes tap.fetch('run'), 'python3 scripts/update-tap.py "$RELEASE_TAG"'
+    refute steps.any? { |step| step.fetch('run', '').include?('scripts/update-tap.py') }
+    build = steps.find { |step| step['name'] == 'Build, self-test, notarize and staple Universal app' }
+    assert_equal 'developer-id', build.fetch('env').fetch('GKSDUD_SIGN_MODE')
+    assert_equal '1', build.fetch('env').fetch('GKSDUD_NOTARIZE')
     create_tag = steps.find { |step| step['name'] == 'Create tag for the verified source' }
     verify_archive = steps.find { |step| step['name'] == 'Verify archive and prepare release metadata' }
     assert_operator steps.index(create_tag), :>, steps.index(verify_archive)
@@ -221,7 +224,7 @@ class ReleaseTests < Minitest::Test
               'RELEASE_JSON' => JSON.generate(tagName: actual_tag, isDraft: draft, isPrerelease: prerelease),
               'CAPTURE' => "#{dir}/args.json", 'NOTES' => "#{dir}/notes.md",
               'VIEW_EXIT' => view_exit.to_s, 'EDIT_EXIT' => edit_exit.to_s }
-      output, status = Open3.capture2e(env, '/usr/bin/ruby', "#{ROOT}/scripts/publish-release.rb", 'codingnoye/gksdud', 'v1.2.0')
+      output, status = Open3.capture2e(env, '/usr/bin/ruby', "#{ROOT}/scripts/publish-release.rb", 'CenoX/gksdud', 'v1.2.0')
       args = File.exist?("#{dir}/args.json") ? JSON.parse(File.read("#{dir}/args.json")) : nil
       notes = File.exist?("#{dir}/notes.md") ? File.read("#{dir}/notes.md") : nil
       [status, args, notes, output]
@@ -232,12 +235,13 @@ class ReleaseTests < Minitest::Test
     summary = "- Option+` fix\n- Literal $(touch nope) \\1 text"
     status, args, notes, output = publication_result(summary: summary)
     assert status.success?, output
-    assert_equal ['release', 'edit', 'v1.2.0', '--repo', 'codingnoye/gksdud', '--notes-file'], args.first(6)
+    assert_equal ['release', 'edit', 'v1.2.0', '--repo', 'CenoX/gksdud', '--notes-file'], args.first(6)
     assert_equal ['--draft=false', '--latest'], args.last(2)
     assert_equal 9, args.length
     assert_includes notes, summary
     refute_includes notes, '<!-- 게시 전'
-    assert_includes notes, 'brew install --cask codingnoye/tap/gksdud'
+    assert_includes notes, 'Developer ID로 서명하고 Apple 공증을 받은 빌드입니다.'
+    refute_includes notes, 'brew install --cask codingnoye/tap/gksdud'
   end
 
   def test_published_release_is_not_edited_on_retry

@@ -14,7 +14,7 @@ func runFeatureTests() {
     featureCheck(ReleaseVersion("v1.10.0")! > ReleaseVersion("1.9.9")!)
     featureCheck(ReleaseVersion("1.2")! == ReleaseVersion("1.2.0")!)
     for invalid in ["pre-v1.3.0", "1.3.0-beta", "1..2", "1.2x", "", "1.2.99999999999999999999999"] { featureCheck(ReleaseVersion(invalid) == nil) }
-    func release(_ body: String?, tag: String = "v1.3.0", url: String = "https://github.com/codingnoye/gksdud/releases/tag/v1.3.0", draft: Bool = false, pre: Bool = false) -> AppRelease {
+    func release(_ body: String?, tag: String = "v1.3.0", url: String = "https://github.com/CenoX/gksdud/releases/tag/v1.3.0", draft: Bool = false, pre: Bool = false) -> AppRelease {
         AppRelease(tag_name: tag, html_url: url, body: body, draft: draft, prerelease: pre)
     }
     let sample = release("### 요약\r\n\r\n- 탭 추가\r\n- 특수문자 개선\r\n\r\n### 설치\r\n이 내용은 표시하지 않습니다.")
@@ -28,6 +28,7 @@ func runFeatureTests() {
     featureCheck(!release(nil, draft: true).isNewer(than: "1.2.0"))
     featureCheck(!release(nil, pre: true).isNewer(than: "1.2.0"))
     featureCheck(!release(nil, url: "https://github.com.evil.test/codingnoye/gksdud/releases/tag/v3.0").isNewer(than: "1.2.0"))
+    featureCheck(!release(nil, url: "https://github.com/codingnoye/gksdud/releases/tag/v1.3.0").isNewer(than: "1.2.0"), "Upstream releases must not update this fork")
     let suite = "io.gksdud.feature-tests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -36,6 +37,7 @@ func runFeatureTests() {
     let checker = UpdateChecker(defaults: defaults, installedVersion: "1.2.0", now: { now }, fetch: { request, done in
         requests += 1; completion = done
         featureCheck(request.url?.host == "api.github.com" && request.timeoutInterval == 20)
+        featureCheck(request.url?.path == "/repos/CenoX/gksdud/releases/latest")
     })
     func respond(_ status: Int, _ data: Data?) {
         completion?(data, HTTPURLResponse(url: URL(string: "https://api.github.com")!, statusCode: status, httpVersion: nil, headerFields: nil), nil)
@@ -426,11 +428,13 @@ func runUpdateInstallTests() throws {
     rejected { try UpdateValidation.archiveNames("/gksdud.app/file", listing: listing) }
     rejected { try UpdateValidation.archiveNames(names, listing: listing.replacingOccurrences(of: "-rwx", with: "lrwx")) }
     rejected { try UpdateValidation.archiveNames(names, listing: listing.replacingOccurrences(of: "42 bx", with: "999999999 bx")) }
-    var release = AppRelease(tag_name: "v1.3.0", html_url: "https://github.com/codingnoye/gksdud/releases/tag/v1.3.0", body: nil, draft: false, prerelease: false)
-    release.assets = [ReleaseAsset(name: "test.zip", browser_download_url: "https://github.com/codingnoye/gksdud/releases/download/v1.3.0/test.zip", size: 100)]
+    var release = AppRelease(tag_name: "v1.3.0", html_url: "https://github.com/CenoX/gksdud/releases/tag/v1.3.0", body: nil, draft: false, prerelease: false)
+    release.assets = [ReleaseAsset(name: "test.zip", browser_download_url: "https://github.com/CenoX/gksdud/releases/download/v1.3.0/test.zip", size: 100)]
     let assetURL = try release.assetURL(named: "test.zip", limit: 100)
     featureCheck(assetURL.host == "github.com")
     rejected { _ = try release.assetURL(named: "test.zip", limit: 99) }
+    release.assets = [ReleaseAsset(name: "test.zip", browser_download_url: "https://github.com/codingnoye/gksdud/releases/download/v1.3.0/test.zip", size: 100)]
+    rejected { _ = try release.assetURL(named: "test.zip", limit: 100) }
     release.assets = [ReleaseAsset(name: "test.zip", browser_download_url: "https://evil.test/test.zip", size: 100)]
     rejected { _ = try release.assetURL(named: "test.zip", limit: 100) }
     rejected { _ = try UpdateValidation.installedRequirement(candidate) }
@@ -466,11 +470,11 @@ func runPrereleaseTests() {
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let tag = "pre-v1.3.0"
-    let preview = AppRelease(tag_name: tag, html_url: "https://github.com/codingnoye/gksdud/releases/tag/\(tag)", body: nil, draft: false, prerelease: true)
+    let preview = AppRelease(tag_name: tag, html_url: "https://github.com/CenoX/gksdud/releases/tag/\(tag)", body: nil, draft: false, prerelease: true)
     featureCheck(!preview.isNewer(than: "1.2.0"))
     var completion: ((Data?, URLResponse?, Error?) -> Void)?
     let checker = UpdateChecker(defaults: defaults, installedVersion: "1.2.0", fetch: { request, done in
-        featureCheck(request.url?.path == "/repos/codingnoye/gksdud/releases/latest" && request.url?.query == nil)
+        featureCheck(request.url?.path == "/repos/CenoX/gksdud/releases/latest" && request.url?.query == nil)
         completion = done
     })
     checker.check()

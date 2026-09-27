@@ -6,6 +6,8 @@
 
 앱 하나로 **씹힘 없는 한영 전환**을 설정하는 유틸
 
+[codingnoye/gksdud](https://github.com/codingnoye/gksdud)를 포크했습니다. 원본의 기능은 그대로 두고, **Developer ID 서명과 Apple 공증**으로 배포할 수 있도록 서명 문제만 손봤습니다.
+
 ## 주요 기능
 
 <img width="320" alt="preference demo" src="https://github.com/user-attachments/assets/aec4ba4f-fb0c-4ec8-bee9-d66f570353f3" />
@@ -30,7 +32,7 @@
 
 ### ⚠️ 주의
 
-현재는 **자체 서명**이므로 macOS가 최초 실행을 차단할 수 있습니다.
+원본은 **자체 서명**이므로 macOS가 최초 실행을 차단할 수 있습니다.
 
 실행이 막힌 후 `설정` → `개인정보 보호 및 보안` → `보안`에서 실행을 허용해주세요.
 
@@ -45,6 +47,8 @@ brew install --cask codingnoye/tap/gksdud
 1. [릴리스 페이지](https://github.com/codingnoye/gksdud/releases/latest)에서 ZIP 압축 파일을 내려받습니다.
 2. ZIP 압축을 풀고 안에 있는 `gksdud.app`을 **응용 프로그램** 폴더로 옮깁니다.
 3. 응용 프로그램 폴더에서 gksdud를 실행합니다.
+
+서명·공증된 앱은 [이 포크의 릴리스 탭](https://github.com/CenoX/gksdud/releases)에서 받을 수 있습니다.
 
 ## 사용하기
 

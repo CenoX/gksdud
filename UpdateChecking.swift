@@ -23,7 +23,7 @@ struct AppRelease: Codable {
     var pageURL: URL? {
         guard let url = URL(string: html_url), url.scheme == "https", url.host == "github.com",
               url.user == nil, url.password == nil,
-              url.path.hasPrefix("/codingnoye/gksdud/releases/tag/") else { return nil }
+              url.path.hasPrefix("/CenoX/gksdud/releases/tag/") else { return nil }
         return url
     }
     var versionString: String { tag_name.hasPrefix("v") ? String(tag_name.dropFirst()) : tag_name }
@@ -86,7 +86,7 @@ final class UpdateChecker {
         checking = true; error = nil
         defaults.set(date.addingTimeInterval(3600), forKey: "updates.nextCheck")
         onChange?()
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/codingnoye/gksdud/releases/latest")!)
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/CenoX/gksdud/releases/latest")!)
         request.timeoutInterval = 20
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")

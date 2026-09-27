@@ -26,7 +26,7 @@ extension AppRelease {
               let asset = matches.first, asset.size > 0, asset.size <= limit,
               let url = URL(string: asset.browser_download_url), url.scheme == "https", url.host == "github.com",
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-              url.path == "/codingnoye/gksdud/releases/download/\(tag_name)/\(name)" else {
+              url.path == "/CenoX/gksdud/releases/download/\(tag_name)/\(name)" else {
             throw UpdateFailure("업데이트 파일을 찾지 못했습니다. 릴리스 페이지를 확인해주세요.")
         }
         return url

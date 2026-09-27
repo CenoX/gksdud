@@ -28,10 +28,12 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'codingnoye/gksdud' && ((github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/pre-v'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    if: github.repository == 'CenoX/gksdud' && ((github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/pre-v'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: macos-15
     timeout-minutes: 30
     environment: release
+    env:
+      GKSDUD_RELEASE_TEAM_ID: ${{ secrets.GKSDUD_RELEASE_TEAM_ID }}
     permissions:
       contents: write
     defaults:
@@ -68,15 +70,19 @@ jobs:
           test -f release-source/build.sh
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $RELEASE_VERSION" release-source/Info.plist
 
-      - name: Import fixed signing identity into temporary keychain
+      - name: Import Developer ID and store notarization credentials in temporary keychain
         env:
           CERTIFICATE_BASE64: ${{ secrets.GKSDUD_CERTIFICATE_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.GKSDUD_CERTIFICATE_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.GKSDUD_NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.GKSDUD_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
           umask 077
           : "${CERTIFICATE_BASE64:?Missing signing certificate secret}"
           : "${P12_PASSWORD:?Missing P12 password secret}"
+          : "${NOTARY_APPLE_ID:?Missing notarization Apple ID secret}"
+          : "${NOTARY_PASSWORD:?Missing notarization app-specific password secret}"
           keychain="$RUNNER_TEMP/gksdud-signing.keychain-db"
           certificate="$RUNNER_TEMP/gksdud-signing.p12"
           keychain_password=$(openssl rand -hex 32)
@@ -88,20 +94,20 @@ jobs:
           security import "$certificate" -P "$P12_PASSWORD" -k "$keychain" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain"
-          security find-certificate -c 'CodingNoye gksdud Local Signing' -p "$keychain" > signing/local-certificate.pem
-          actual=$(openssl x509 -in signing/local-certificate.pem -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')
-          expected=$(tr -d '\n\r' < signing/release-certificate.sha1)
-          [[ "$actual" == "$expected" ]] || { echo 'Signing identity changed; refusing release.'; exit 1; }
-          mkdir -p release-source/signing
-          cp signing/local-certificate.pem release-source/signing/local-certificate.pem
-          # Ephemeral GitHub-hosted runner only; code signing policy, not TLS trust.
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" signing/local-certificate.pem
+          team=${GKSDUD_RELEASE_TEAM_ID:?Missing release team ID secret}
+          [[ "$team" =~ ^[A-Z0-9]{10}$ ]] || { echo 'Invalid release team ID.' >&2; exit 1; }
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -v team="$team" '$0 ~ /"Developer ID Application:/ && index($0, "(" team ")\"") { print $2 }')
+          [[ "$identity" =~ ^[A-Fa-f0-9]{40}$ ]] || { echo 'Expected one valid Developer ID Application identity for the release team.' >&2; exit 1; }
+          printf 'GKSDUD_SIGN_IDENTITY=%s\nGKSDUD_NOTARY_KEYCHAIN=%s\n' "$identity" "$keychain" >> "$GITHUB_ENV"
+          xcrun notarytool store-credentials gksdud --apple-id "$NOTARY_APPLE_ID" --team-id "$team" --password "$NOTARY_PASSWORD" --keychain "$keychain"
           rm -f "$certificate"
 
-      - name: Build and self-test Universal app
+      - name: Build, self-test, notarize and staple Universal app
         working-directory: release-source
         env:
-          GKSDUD_SIGN_MODE: local
+          GKSDUD_SIGN_MODE: developer-id
+          GKSDUD_NOTARIZE: '1'
+          GKSDUD_NOTARY_PROFILE: gksdud
           GKSDUD_APP_VERSION: ${{ steps.version.outputs.version }}
         run: bash build.sh
 
@@ -186,13 +192,3 @@ jobs:
           RELEASE_SUMMARY: ${{ inputs.release_summary }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: ruby scripts/publish-release.rb "$GITHUB_REPOSITORY" "$RELEASE_TAG"
-
-      - name: Verify published assets and open Homebrew update PR
-        if: github.event_name == 'workflow_dispatch' && steps.version.outputs.prerelease == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          test -n "$TAP_GITHUB_TOKEN" || { echo 'Missing Homebrew tap token.' >&2; exit 1; }
-          python3 scripts/update-tap.py "$RELEASE_TAG"

@@ -3,16 +3,11 @@
 ## 작업 흐름
 
 1. 작업 목적과 범위를 정합니다. 이슈를 만들 필요는 없습니다.
-2. 최신 `main`에서 `feat/설명`, `fix/설명`, `chore/설명` 형식의 브랜치를 만듭니다.
-3. 변경과 검증을 작업 브랜치에 커밋하고 PR을 엽니다. 제목은 `[FEAT] 기능 추가`, `[FIX] 버그 수정`, `[CHORE] 유지관리`처럼 작성합니다.
-4. 자동 검사를 통과하고 대화를 해결한 뒤 **Squash and merge**로 병합합니다. PR 제목은 main에 남을 커밋 제목이므로 변경 내용을 간결하게 적습니다.
-5. 병합한 브랜치는 삭제하고 다음 작업은 최신 `main`에서 시작합니다.
+2. 최신 `main`에서 작업 브랜치를 만들고 로컬에서 빌드와 테스트를 실행합니다.
+3. 영어 Conventional Commits 형식으로 커밋합니다. `Co-Authored-By`는 넣지 않습니다.
+4. 로컬 `main`에 머지한 뒤 push합니다.
 
-`main`에 직접 push하거나 공개한 릴리스 태그를 이동하지 않습니다. 단독 유지관리 프로젝트이므로 타인의 승인을 필수로 요구하지 않지만, PR과 자동 검사는 생략하지 않습니다.
-
-PR 검사는 ad-hoc 서명을 사용하며 배포 서명 키나 Secrets가 필요하지 않습니다.
-
-PR 제목에는 `[FEAT]`, `[FIX]`, `[CHORE]`, `[DOCS]`, `[REFACTOR]`, `[TEST]`, `[CI]`, `[PERF]`, `[BUILD]`, `[REVERT]` 중 하나를 사용합니다. 이슈 연결은 필수가 아니며, 에이전트는 사용자 요청 없이 이슈를 만들지 않습니다.
+이 포크는 CI를 사용하지 않습니다. 빌드·서명·공증은 로컬에서 수행하고 완성된 배포 파일을 GitHub Releases에 직접 올립니다. 인증서와 공증 인증은 로컬 키체인에 보관합니다.
 
 ## 개발 환경과 빌드
 
@@ -68,24 +63,22 @@ GKSDUD_NOTARIZE=1 bash build.sh
 
 ## 정식 릴리즈와 프리릴리즈
 
-`Info.plist`의 `CFBundleShortVersionString`을 배포할 버전으로 변경하고, 정식 릴리즈는 PR을 병합한 커밋에 태그를 만들어 push합니다. 프리릴리즈는 자동 검사를 통과한 PR 커밋에서도 게시할 수 있습니다. 태그의 버전과 앱 버전이 다르면 빌드를 중단합니다.
+`Info.plist`의 `CFBundleShortVersionString`을 배포할 버전으로 변경하고, 로컬에서 공증 빌드를 만듭니다. `main`에 머지하고 push한 뒤 해당 커밋에 태그를 만들어 push합니다.
 
-| 태그 예시 | 자동 처리 | 다운로드 파일 |
+| 태그 예시 | 종류 | 다운로드 파일 |
 | --- | --- | --- |
-| `v1.2.0` | 정식 릴리즈 **초안** 생성, 확인 후 수동 게시 | `gksdud-1.2.0-macos-universal.zip` |
-| `pre-v1.2.0` | **Pre-release로 바로 공개**, Latest 유지 | `gksdud-1.2.0-pre-macos-universal.zip` |
+| `v1.2.0` | 정식 릴리즈 | `gksdud-1.2.0-macos-universal.zip` |
+| `pre-v1.2.0` | 프리릴리즈 | `gksdud-1.2.0-pre-macos-universal.zip` |
 
-둘 다 같은 Developer ID로 서명하고 공증한 Intel·Apple Silicon용 앱과 체크섬을 만듭니다. 프리릴리즈는 앱의 정식 업데이트에서 제외되며, 설치 안내와 GitHub가 생성한 변경 내역을 본문에 넣습니다. 이 포크에서는 원본의 Homebrew tap을 갱신하지 않습니다.
+둘 다 같은 Developer ID로 서명하고 공증한 Intel·Apple Silicon용 앱과 체크섬을 사용합니다. 프리릴리즈는 앱의 정식 업데이트에서 제외됩니다. 이 포크에서는 원본의 Homebrew tap을 갱신하지 않습니다.
 
-GitHub Actions의 `release` 환경에는 다음 Secrets가 필요합니다.
+배포 전 검증은 다음 명령으로 실행합니다. `GKSDUD_RELEASE_TEAM_ID`에는 서명 인증서의 팀 ID를 지정해주세요.
 
-- `GKSDUD_CERTIFICATE_P12_BASE64`: Developer ID Application 인증서와 개인 키를 내보낸 P12의 Base64
-- `GKSDUD_CERTIFICATE_PASSWORD`: P12 암호
-- `GKSDUD_NOTARY_APPLE_ID`: 개발자 Apple ID
-- `GKSDUD_NOTARY_PASSWORD`: Apple ID의 앱 전용 암호
-- `GKSDUD_RELEASE_TEAM_ID`: 배포 인증서의 개발자 팀 ID
+```sh
+GKSDUD_RELEASE_TEAM_ID=YOUR_TEAM_ID ruby scripts/prepare-release.rb CenoX/gksdud
+```
 
-워크플로는 임시 키체인에 인증서와 공증 인증을 저장하고, Secret에 지정한 팀의 서명·공증 티켓·Gatekeeper를 검증한 ZIP만 배포합니다. 로컬에서 `scripts/prepare-release.rb`를 실행할 때도 `GKSDUD_RELEASE_TEAM_ID`로 팀 ID를 지정합니다.
+검증한 ZIP과 생성된 `SHA256SUMS`를 해당 태그의 GitHub 릴리즈에 직접 첨부합니다. 정식 버전은 최신 릴리즈로, 테스트 버전은 프리릴리즈로 표시합니다.
 
 기존 `pre-v.1.2.0` 형식도 호환성을 위해 지원합니다.
 
@@ -96,13 +89,13 @@ git tag pre-v1.2.0
 git push origin pre-v1.2.0
 ```
 
-이미 공개한 태그나 파일은 덮어쓰지 않습니다. 수정한 테스트 버전을 추가 배포하려면 앱 버전과 태그를 함께 올립니다. Actions의 `Release`를 수동 실행할 때도 기존 정식·프리릴리즈 태그를 지정할 수 있으며, main의 앱 소스가 해당 태그와 일치해야 합니다.
+이미 공개한 태그나 파일은 덮어쓰지 않습니다. 수정한 테스트 버전을 추가 배포하려면 앱 버전과 태그를 함께 올립니다.
 
 ## 릴리즈 노트
 
 `.github/RELEASE_NOTES.md`는 릴리즈 초안 생성에 쓰는 공통 설치·업데이트 안내입니다. 버전별 변경 내용은 이 템플릿에 넣지 않습니다.
 
-릴리즈 워크플로가 초안을 만들면 GitHub Releases에서 본문 상단에 해당 버전의 변경 내용을 작성하고 확인한 뒤 게시합니다. 게시한 릴리즈의 설명도 GitHub Releases에서 직접 수정합니다. 템플릿 수정은 이미 생성된 릴리즈 본문에 반영되지 않습니다.
+GitHub Releases에서 릴리즈 초안을 만들고 본문 상단에 해당 버전의 변경 내용을 작성한 뒤, 배포 파일과 체크섬을 첨부해 게시합니다. 템플릿 수정은 이미 생성된 릴리즈 본문에 반영되지 않습니다.
 
 `CHANGELOG.md`에는 저장소의 버전별 변경 이력을 유지합니다.
 

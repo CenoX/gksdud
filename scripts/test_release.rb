@@ -1,5 +1,4 @@
 require 'minitest/autorun'
-require 'yaml'
 require 'json'
 require 'tmpdir'
 require 'open3'
@@ -29,15 +28,6 @@ class ReleaseTests < Minitest::Test
     legacy = ReleaseMetadata.new('1.2.0', 'pre-v.1.2.0')
     assert legacy.prerelease?
     assert_equal pre.filename, legacy.filename
-  end
-
-  def test_workflow_triggers_for_both_prerelease_tag_formats
-    workflow = YAML.load_file("#{ROOT}/.github/workflows/release.yml")
-    triggers = workflow.fetch('on') { workflow.fetch(true) }
-    patterns = triggers.fetch('push').fetch('tags')
-    %w[v1.2.0 pre-v1.2.0 pre-v.1.2.0].each do |tag|
-      assert patterns.any? { |pattern| File.fnmatch?(pattern, tag) }, "No push trigger for #{tag}"
-    end
   end
 
   def with_release_repository
@@ -115,95 +105,6 @@ class ReleaseTests < Minitest::Test
         assert_raises(StandardError) { selection.resolve(**base.merge(change)) }
       end
     end
-  end
-
-  def test_requested_version_is_applied_only_to_selected_checkout
-    workflow = YAML.load_file("#{ROOT}/.github/workflows/release.yml")
-    step = workflow.fetch('jobs').fetch('release').fetch('steps').find { |item| item['name'] == 'Prepare selected source version' }
-    Dir.mktmpdir('gksdud-selected-version-') do |dir|
-      Dir.mkdir("#{dir}/release-source")
-      original = File.read("#{ROOT}/Info.plist")
-      File.write("#{dir}/Info.plist", original)
-      File.write("#{dir}/release-source/Info.plist", original)
-      File.write("#{dir}/release-source/LICENSE", 'Test license')
-      File.write("#{dir}/release-source/build.sh", 'true')
-      output, status = Open3.capture2e({ 'RELEASE_VERSION' => '9.8.7' }, '/bin/bash', '-c', step.fetch('run'), chdir: dir)
-      assert status.success?, output
-      version, status = Open3.capture2e('/usr/libexec/PlistBuddy', '-c', 'Print :CFBundleShortVersionString', "#{dir}/release-source/Info.plist")
-      assert status.success?, version
-      assert_equal '9.8.7', version.strip
-      assert_equal original, File.read("#{dir}/Info.plist")
-    end
-  end
-
-  # Run the actual publication shell block against a fake gh command. No network
-  # or signing secrets are used, and no tag or release is created.
-  def release_arguments(tag)
-    metadata = ReleaseMetadata.new('1.2.0', tag)
-    workflow = YAML.load_file("#{ROOT}/.github/workflows/release.yml")
-    step = workflow.fetch('jobs').fetch('release').fetch('steps').find do |item|
-      item.fetch('name', '').start_with?('Create stable draft')
-    end
-    Dir.mktmpdir('gksdud-release-test-') do |dir|
-      File.write("#{dir}/gh", "#!/usr/bin/ruby\nrequire 'json'\nFile.write(ENV.fetch('CAPTURE'), JSON.generate(ARGV))\n")
-      File.chmod(0755, "#{dir}/gh")
-      env = metadata.outputs.transform_keys { |key| key.to_s.upcase }.transform_values(&:to_s)
-      env.merge!('PATH' => "#{dir}:#{ENV.fetch('PATH')}", 'GITHUB_REPOSITORY' => 'CenoX/gksdud',
-                 'SOURCE_ROOT' => 'release-source',
-                 'CAPTURE' => "#{dir}/args.json")
-      output, status = Open3.capture2e(env, '/bin/bash', '-c', step.fetch('run'), chdir: ROOT)
-      assert status.success?, output
-      JSON.parse(File.read("#{dir}/args.json"))
-    end
-  end
-
-  def test_stable_remains_a_draft
-    args = release_arguments('v1.2.0')
-    assert_equal ['release', 'create', 'v1.2.0'], args.first(3)
-    assert_includes args, '--draft'
-    refute_includes args, '--prerelease'
-    assert_includes args, 'release-source/outputs/gksdud-1.2.0-macos-universal.zip'
-    assert_includes args, 'release-source/outputs/release-1.2.0/SHA256SUMS'
-    assert_includes args, '.github/RELEASE_NOTES.md'
-    assert_includes args, '--verify-tag'
-  end
-
-  def test_prerelease_is_published_without_changing_latest
-    %w[pre-v1.2.0 pre-v.1.2.0].each do |tag|
-      args = release_arguments(tag)
-      assert_equal ['release', 'create', tag], args.first(3)
-      assert_includes args, '--prerelease'
-      assert_includes args, '--latest=false'
-      refute_includes args, '--draft'
-      assert_includes args, 'release-source/outputs/gksdud-1.2.0-pre-macos-universal.zip'
-      assert_includes args, 'release-source/outputs/release-1.2.0-pre/SHA256SUMS'
-      assert_includes args, '.github/PRERELEASE_NOTES.md'
-      assert_includes args, '--generate-notes'
-      assert_includes args, '--verify-tag'
-    end
-  end
-
-  def test_fork_publication_requires_explicit_dispatch_and_never_updates_upstream_tap
-    workflow = YAML.load_file("#{ROOT}/.github/workflows/release.yml")
-    triggers = workflow.fetch('on') { workflow.fetch(true) }
-    inputs = triggers.fetch('workflow_dispatch').fetch('inputs')
-    assert_equal %w[release_summary source_ref version], inputs.keys.sort
-    assert_equal 'main', inputs.fetch('source_ref').fetch('default')
-    steps = workflow.fetch('jobs').fetch('release').fetch('steps')
-    publish = steps.find { |step| step['name'] == 'Publish verified stable draft' }
-    tap = steps.find { |step| step['name'] == 'Verify published assets and open Homebrew update PR' }
-    assert_equal "github.event_name == 'workflow_dispatch' && steps.version.outputs.prerelease == 'false'", publish.fetch('if')
-    assert_nil tap
-    assert_includes workflow.fetch('jobs').fetch('release').fetch('if'), "github.repository == 'CenoX/gksdud'"
-    assert_operator steps.index(publish), :>, steps.index(steps.find { |step| step['id'] == 'existing' })
-    refute steps.any? { |step| step.fetch('run', '').include?('scripts/update-tap.py') }
-    build = steps.find { |step| step['name'] == 'Build, self-test, notarize and staple Universal app' }
-    assert_equal 'developer-id', build.fetch('env').fetch('GKSDUD_SIGN_MODE')
-    assert_equal '1', build.fetch('env').fetch('GKSDUD_NOTARIZE')
-    create_tag = steps.find { |step| step['name'] == 'Create tag for the verified source' }
-    verify_archive = steps.find { |step| step['name'] == 'Verify archive and prepare release metadata' }
-    assert_operator steps.index(create_tag), :>, steps.index(verify_archive)
-    assert_equal 'false', create_tag.fetch('if')[/== '([^']+)'/, 1]
   end
 
   def publication_result(draft: true, prerelease: false, actual_tag: 'v1.2.0', summary: 'Input fixes', view_exit: 0, edit_exit: 0)

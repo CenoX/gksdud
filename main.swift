@@ -1292,6 +1292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func requestPressAccess() {
         returningFromPermissionSettings = true
         permissionSettingsWasActive = false
+        UpdateValidation.forgetUnusablePermissions(defaults: engine.defaults)
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         // Let the system prompt offer Settings; do not open it before the user chooses.
         _ = AXIsProcessTrustedWithOptions(options)
@@ -1809,7 +1810,7 @@ if CommandLine.arguments.dropFirst().first == "--install-update" {
     #if TESTS
     if runTestMode() { exit(0) }
     #endif
-    // Before anything asks about Accessibility: a process keeps the answer it got first.
+    // Before anything asks about Accessibility, so that the first answer is already for this build.
     let askForPermission = UpdateValidation.forgetSelfSignedPermissions(defaults: .standard)
     let app = NSApplication.shared
     let delegate = AppDelegate()

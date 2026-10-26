@@ -472,7 +472,7 @@ func runRightControlTests() {
     let engine = Engine(defaults: defaults, discover: { [keyboard] })
     precondition(engine.defaultSources == [sources[0]], "The default remains right Command")
     precondition(sources.contains(rightControl), "Right Control must be selectable")
-    for target in targets {
+    for target in switchTargets {
         defaults.set(target.name, forKey: "target")
         defaults.set(String(sources[0]), forKey: "source")
         precondition((try! engine.reconcile()) == 1)
@@ -496,7 +496,9 @@ func runRightControlTests() {
             "Disable restores both original Control mappings")
         defaults.set(true, forKey: "active")
     }
-    print("PASS: right Control across F13-F20, left Control preservation, source changes, saved selection, restart, disable restoration")
+    defaults.set("F20", forKey: "target")
+    precondition(engine.target.name == "F19", "F20, which the system shortcut ignores, falls back to F19")
+    print("PASS: right Control across F13-F19, F20 falling back to F19, left Control preservation, source changes, saved selection, restart, disable restoration")
 }
 
 // The lock screen gets the keyboards' own keys back without turning activation off; unlocking maps them again.
@@ -738,27 +740,39 @@ func renderKeyboardUI(to directory: String) throws {
         try save(delegate.window.contentView!, "right-control-\(name).png")
     }
     print("PASS: source picker actions and saved selection for right Command, right Option, Caps Lock, right Control and Space combinations")
-    // 입력 소스 추가, cycling with a saved source macOS no longer offers, then with a separate key.
-    let enabledSources = delegate.enabledSources()
+    // 입력 소스 추가: the section, and its sheet with the cycle, other sources, one turned off and a saved one macOS no longer offers.
+    let korean = InputSourceIdentity(id: "com.apple.inputmethod.Korean.2SetKorean", language: "ko"),
+        abc = InputSourceIdentity(id: "com.apple.keylayout.ABC", language: "en"),
+        japanese = InputSourceIdentity(id: "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese", language: "ja"),
+        pinyin = InputSourceIdentity(id: "com.apple.inputmethod.SCIM.ITABC", language: "zh-Hans"),
+        dvorak = InputSourceIdentity(id: "com.apple.keylayout.Dvorak", language: "en")
+    delegate.sourceCache = (list: [korean, abc, japanese, pinyin, dvorak], layouts: [abc.id, dvorak.id])
+    let savedKeys = engine.defaultSources
+    engine.defaultSources = [sources[0]]
     defaults.set(true, forKey: "addedSources")
-    engine.cycleSources = defaultCycle(enabledSources) + ["com.example.inputmethod.Removed"]
+    engine.cycleSources = [korean.id, abc.id, japanese.id, "com.example.inputmethod.Removed"]
+    engine.disabledSources = [dvorak.id]
+    engine.setSourceKey(sources[1], for: pinyin.id); engine.setSourceKey(spaceCombos[2], for: korean.id)
+    engine.setSourceKey(sources[3], for: "com.example.inputmethod.Removed")
     delegate.addedSources.refresh(force: true)
-    precondition(delegate.addedSources.list.arrangedSubviews.count == enabledSources.count + 1)
+    engine.availableSources = { Set(delegate.enabledSources().map(\.id)) }
+    precondition(delegate.addedSources.rows == [.source(korean.id, .cycle), .source(abc.id, .cycle), .source(japanese.id, .cycle), .gap, .source(pinyin.id, .other), .gap,
+                          .source(dvorak.id, .off)], "Cycle, others, off; a saved source macOS no longer offers is left out")
+    precondition(delegate.addedSources.warning.isHidden && engine.usedSourceKeys == [pinyin.id: sources[1], korean.id: spaceCombos[2]],
+        "and its key goes back to the keyboard without a warning")
     for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
         delegate.window.appearance = NSAppearance(named: appearance); delegate.selectTab(3)
-        try save(delegate.window.contentView!, "added-cycle-\(name).png")
+        try save(delegate.window.contentView!, "added-section-\(name).png")
+        delegate.addedSources.window.appearance = NSAppearance(named: appearance)
+        try save(delegate.addedSources.window.contentView!, "added-sources-\(name).png")
+        delegate.addedSources.window.orderOut(nil)
     }
-    defaults.set(AddedSourceMode.separate.rawValue, forKey: "addedSourceMode")
-    engine.separateKey = sources[1]; engine.separateSource = enabledSources.first { !isKorean($0) && !isEnglish($0) }?.id
-    delegate.addedSources.refresh(force: true)
-    for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
-        delegate.window.appearance = NSAppearance(named: appearance); delegate.selectTab(3)
-        try save(delegate.window.contentView!, "added-separate-\(name).png")
-    }
-    engine.separateKey = engine.mappedSources.first; delegate.addedSources.refresh(force: true)
-    precondition(!delegate.addedSources.warning.isHidden || !AXIsProcessTrusted(), "A separate key that is a Korean/English key is shown")
-    try save(delegate.window.contentView!, "added-separate-conflict.png")
-    for key in ["addedSources", "addedSourceMode", "cycleSources", "separateKey", "separateSource"] { defaults.removeObject(forKey: key) }
+    engine.setSourceKey(engine.mappedSources.first, for: pinyin.id); delegate.addedSources.refresh(force: true)
+    precondition(delegate.addedSources.warning.stringValue == "전용 전환 키가 한영 키와 겹칩니다. 다른 키를 선택해주세요.", "A source's key that is a Korean/English key is shown")
+    try save(delegate.window.contentView!, "added-section-conflict.png")
+    for key in ["addedSources", "cycleSources", "sourceKeys", "disabledSources"] { defaults.removeObject(forKey: key) }
+    engine.defaultSources = savedKeys
+    delegate.sourceCache = nil; engine.availableSources = { nil }
     delegate.addedSources.refresh(force: true)
     // Caps Lock chosen as a Korean/English key while Caps Lock in Korean is on: the warning, then the tab once confirmed.
     // runCapsLockKeyTests checks the answers.
@@ -925,88 +939,260 @@ func renderKeyboardUI(to directory: String) throws {
     print("Rendered UI to \(directory)")
 }
 
-// The separate key maps beside the Korean/English keys on its own F-key, and gives way to them.
-func runSeparateKeyTests() {
+// Sources' keys map beside the Korean/English keys, each on its own F-key, and give way to them.
+func runSourceKeyTests() {
     func mapping(_ source: UInt64, _ target: UInt64) -> Mapping { [srcKey: NSNumber(value: source), dstKey: NSNumber(value: target)] }
     func same(_ lhs: [Mapping], _ rhs: [Mapping]) -> Bool { KeyboardManager.canonical(lhs) == KeyboardManager.canonical(rhs) }
-    let command = sources[0], option = sources[1], capsLock = sources[2], leftOption: UInt64 = 0x7000000e2, f18 = targets[5].usage
-    let suite = "io.gksdud.separate-key-tests.\(UUID().uuidString)"
+    let command = sources[0], option = sources[1], capsLock = sources[2], control = sources[3], leftOption: UInt64 = 0x7000000e2
+    let f18 = targets[5].usage, f17 = targets[4].usage
+    let suite = "io.gksdud.source-key-tests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let keyboard = TestKeyboard("s1", serial: "separate", mappings: [mapping(option, leftOption)])
     var devices: [KeyboardDevice] = [keyboard]
     let manager = KeyboardManager(defaults: defaults, discover: { devices })
-    let extra = ExtraKey(source: option, target: f18)
-    func repair(_ extra: ExtraKey?, active: Bool = true) -> KeyboardReconcileResult {
-        manager.reconcile(sources: [command], target: f19, active: active, extra: extra)
+    let extra = ExtraKey(source: option, target: f18), second = ExtraKey(source: control, target: f17)
+    func repair(_ extras: [ExtraKey], active: Bool = true) -> KeyboardReconcileResult {
+        manager.reconcile(sources: [command], target: f19, active: active, extras: extras)
     }
-    _ = repair(extra)
-    precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, f18)]), "The separate key goes to its own F-key")
+    _ = repair([extra])
+    precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, f18)]), "A source's key goes to its own F-key")
     precondition(owns(manager.records[keyboard.registryID], mapping(option, f18)), "Its mapping is ours")
-    var writes = keyboard.writes; _ = repair(extra)
+    var writes = keyboard.writes; _ = repair([extra])
     precondition(keyboard.writes == writes, "Unchanged hardware is not rewritten")
-    _ = repair(nil)
-    precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, leftOption)]), "Without it, the key's own mapping comes back")
-    _ = repair(ExtraKey(source: command, target: f18))
+    _ = repair([extra, second])
+    precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, f18), mapping(control, f17)])
+        && owns(manager.records[keyboard.registryID], mapping(control, f17)), "Two keys, two F-keys")
+    _ = repair([second])
+    precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, leftOption), mapping(control, f17)]), "One dropped gets its own mapping back")
+    _ = repair([])
+    precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, leftOption)]), "Without them, the keys' own mappings come back")
+    _ = repair([ExtraKey(source: command, target: f18)])
     precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, leftOption)]), "A Korean/English key stays one")
-    _ = repair(extra); _ = repair(extra, active: false)
-    precondition(keyboard.mappings == [mapping(option, leftOption)] && manager.records[keyboard.registryID] == nil, "Turning off restores it too")
+    _ = repair([extra, second]); _ = repair([extra], active: false)
+    precondition(keyboard.mappings == [mapping(option, leftOption)] && manager.records[keyboard.registryID] == nil, "Turning off restores them too")
     keyboard.afterWrite = { keyboard.failRead = true }
-    _ = repair(extra)
+    _ = repair([extra, second])
     keyboard.afterWrite = nil; keyboard.failRead = false
-    _ = repair(nil, active: false)
-    precondition(keyboard.mappings == [mapping(option, leftOption)], "A failed readback still undoes the separate key")
+    _ = repair([], active: false)
+    precondition(keyboard.mappings == [mapping(option, leftOption)], "A failed readback still undoes them")
+    // An older version saved one extra target.
+    manager.records = [keyboard.registryID: ["source": encodeSources([command, option]), "original": "none,\(leftOption)", "target": String(f19), "extraTarget": String(f18)]]
+    keyboard.mappings = [mapping(command, f19), mapping(option, f18)]
+    _ = repair([], active: false)
+    precondition(keyboard.mappings == [mapping(option, leftOption)], "An older record still undoes its key")
     manager.setSources([option], for: keyboard.identity.key)
-    _ = repair(extra)
+    _ = repair([extra])
     precondition(same(keyboard.mappings, [mapping(option, f19)]), "A keyboard whose own Korean/English key it is keeps that")
     manager.setSources(nil, for: keyboard.identity.key)
-    writes = keyboard.writes; _ = repair(extra)
+    writes = keyboard.writes; _ = repair([extra])
     precondition(same(keyboard.mappings, [mapping(command, f19), mapping(option, f18)]) && keyboard.writes == writes + 1, "Moving between roles is one write")
-    _ = repair(nil, active: false)
+    _ = repair([], active: false)
     let taken = TestKeyboard("s2", serial: "taken", mappings: [mapping(capsLock, f18)])
     devices = [taken]
-    let blocked = repair(extra)
-    precondition(blocked.extraBlocked == 1 && blocked.pending == 0 && same(taken.mappings, [mapping(capsLock, f18), mapping(command, f19)]),
-        "A taken F-key leaves the Korean/English key working")
-    _ = repair(nil, active: false)
+    let blocked = repair([extra, second])
+    precondition(blocked.extraBlocked == 1 && blocked.blockedTargets == [f18] && blocked.pending == 0
+        && same(taken.mappings, [mapping(capsLock, f18), mapping(command, f19), mapping(control, f17)]),
+        "A taken F-key leaves the Korean/English key and the other keys working")
+    _ = repair([], active: false)
     precondition(taken.mappings == [mapping(capsLock, f18)])
+    precondition(repair([second]).foreignTargets == [f18], "Another mapping's F-key is known")
+    precondition(manager.reconcile(sources: [command], target: f19, active: true, away: true, extras: [second]).foreignTargets == [f18],
+        "and still counts while away, when it is not read")
+    taken.failRead = true
+    precondition(repair([second]).foreignTargets == [f18], "or when reading fails")
+    taken.failRead = false
+    _ = repair([], active: false)
+    // A run that ended without its undo left the key on its F-key; mapping it there again keeps no such original.
+    let leftover = TestKeyboard("s3", serial: "leftover", mappings: [mapping(option, f18)])
+    devices = [leftover]
+    _ = repair([extra]); _ = repair([])
+    precondition(same(leftover.mappings, [mapping(command, f19)]), "Dropped, the key goes back to itself, not to the F-key")
+    _ = repair([], active: false)
 
-    // Settings: the separate key maps only when it is a single key, a source is chosen, and the tap can act on it.
-    let engineSuite = "io.gksdud.separate-engine-tests.\(UUID().uuidString)"
+    // An automatic F-key another mapping sends moves to a free one at once.
+    let movingSuite = "io.gksdud.source-key-moving-tests.\(UUID().uuidString)", movingDefaults = UserDefaults(suiteName: movingSuite)!
+    defer { movingDefaults.removePersistentDomain(forName: movingSuite) }
+    let stray = TestKeyboard("s4", serial: "stray", mappings: [mapping(option, f18)])
+    let moving = Engine(defaults: movingDefaults, discover: { [stray] })
+    moving.accessibilityTrusted = { true }
+    movingDefaults.set(true, forKey: "addedSources")
+    moving.setSourceKey(capsLock, for: "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese")
+    _ = try? moving.reconcile()
+    precondition(same(stray.mappings, [mapping(option, f18), mapping(command, f19), mapping(capsLock, f17)])
+        && moving.internalKey(for: "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese").map { $0.target.name == "F17" && $0.automatic } == true
+        && moving.keyboards.result.blockedTargets.isEmpty, "Caps Lock goes to F17, leaving F18 to the other mapping")
+    moving.setInternalKey("F18", for: "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese")
+    _ = try? moving.reconcile()
+    precondition(moving.keyboards.result.blockedTargets == [f18], "A hand choice stays, with its warning")
+    movingDefaults.set(false, forKey: "active"); _ = try? moving.reconcile()
+
+    // The input menu's next-source shortcut goes on an F-key of its own while added sources are on, and back after.
+    let nextSuite = "io.gksdud.next-shortcut-tests.\(UUID().uuidString)", nextDefaults = UserDefaults(suiteName: nextSuite)!
+    defer { nextDefaults.removePersistentDomain(forName: nextSuite) }
+    let userNext: [String: Any] = ["enabled": true, "value": ["type": "standard", "parameters": [32, 49, 786432]]]
+    var hotkeys: [String: Any] = ["61": userNext], activations = 0
+    let next = Engine(defaults: nextDefaults, discover: { [] },
+                      shortcutPreferences: ShortcutPreferences(read: { hotkeys }, write: { hotkeys = $0 }, activate: { activations += 1 }))
+    next.accessibilityTrusted = { true }
+    try? next.updateNextShortcut()
+    precondition(activations == 0 && next.liveNextTarget == nil && NSDictionary(dictionary: hotkeys["61"] as! [String: Any]).isEqual(to: userNext),
+        "Off, the user's shortcut stays")
+    nextDefaults.set(true, forKey: "addedSources")
+    try? next.updateNextShortcut()
+    precondition(Engine.ownsShortcut(hotkeys["61"], keyCode: targets[3].keyCode) && next.liveNextTarget?.name == "F16" && activations == 1,
+        "On, it goes to F16")
+    try? next.updateNextShortcut()
+    precondition(activations == 1, "Unchanged, nothing is written again")
+    next.refreshSystemFKeys()
+    precondition(!next.systemFKeys.contains(targets[3].keyCode) && next.nextTarget?.name == "F16", "Its own F-key is not taken for another shortcut's")
+    next.setSourceKey(sources[1], for: "com.apple.inputmethod.SCIM.ITABC")
+    next.setSourceKey(sources[2], for: "com.apple.keylayout.ABC"); next.setSourceKey(sources[3], for: "com.apple.keylayout.Dvorak")
+    precondition(next.sourceKeyTargets.mapValues(\.name) == [sources[1]: "F18", sources[2]: "F17", sources[3]: "F20"], "Sources' keys keep clear of it")
+    nextDefaults.set("F16", forKey: "target"); try? next.updateNextShortcut()
+    precondition(Engine.ownsShortcut(hotkeys["61"], keyCode: targets[0].keyCode) && next.liveNextTarget?.name == "F13", "Never the Korean/English key's own")
+    nextDefaults.removeObject(forKey: "target")
+    nextDefaults.set(false, forKey: "addedSources"); try? next.updateNextShortcut()
+    precondition(NSDictionary(dictionary: hotkeys["61"] as! [String: Any]).isEqual(to: userNext) && next.liveNextTarget == nil
+        && nextDefaults.object(forKey: "nextShortcutBackedUp") == nil, "Off again, the user's shortcut comes back")
+    nextDefaults.set(true, forKey: "addedSources"); try? next.updateNextShortcut()
+    let edited: [String: Any] = ["enabled": false, "value": ["type": "standard", "parameters": [32, 49, 786432]]]
+    hotkeys["61"] = edited
+    try? next.restoreSystem()
+    precondition(NSDictionary(dictionary: hotkeys["61"] as! [String: Any]).isEqual(to: edited), "A change made meanwhile is the user's and stays")
+    // Shortcuts are read before the next-source shortcut is placed on launch, and it moves when a free F-key changes.
+    hotkeys = ["61": userNext, "32": ["enabled": true, "value": ["type": "standard", "parameters": [65535, targets[3].keyCode, 8388608]]] as [String: Any]]
+    activations = 0
+    let relaunched = Engine(defaults: nextDefaults, discover: { [] },
+                            shortcutPreferences: ShortcutPreferences(read: { hotkeys }, write: { hotkeys = $0 }, activate: { activations += 1 }),
+                            inputMenu: InputMenuPreference(read: { nil }, write: { _ in }))
+    relaunched.accessibilityTrusted = { true }
+    nextDefaults.set(true, forKey: "active")
+    try? relaunched.resume()
+    precondition(Engine.ownsShortcut(hotkeys["61"], keyCode: targets[0].keyCode) && relaunched.liveNextTarget?.name == "F13",
+        "On launch, F16 taken by another shortcut is stepped around")
+    hotkeys["32"] = nil; relaunched.refreshSystemFKeys(); activations = 0; relaunched.nextFailedKey = "F13"
+    _ = try? relaunched.followNextTarget()
+    precondition(relaunched.liveNextTarget?.name == "F13" && activations == 0 && relaunched.nextFailedKey == "F13",
+        "The one set stays while it is free, and so does its failure")
+    nextDefaults.set(false, forKey: "addedSources"); _ = try? relaunched.followNextTarget()
+    precondition(NSDictionary(dictionary: hotkeys["61"] as! [String: Any]).isEqual(to: userNext) && relaunched.nextFailedKey == nil,
+        "Turned off, repair gives it back and forgets the failure")
+    // A restore written but not activated is activated the next time.
+    nextDefaults.set(true, forKey: "addedSources"); try? relaunched.updateNextShortcut()
+    var failing = true
+    let flaky = Engine(defaults: nextDefaults, discover: { [] }, shortcutPreferences: ShortcutPreferences(read: { hotkeys }, write: { hotkeys = $0 }, activate: {
+        activations += 1; if failing { throw KeyboardError.verification }
+    }))
+    nextDefaults.set(false, forKey: "addedSources"); activations = 0
+    try? flaky.restoreNextShortcut()
+    precondition(nextDefaults.bool(forKey: "nextShortcutBackedUp") && activations == 1, "A failed activation keeps the backup")
+    failing = false; try? flaky.restoreNextShortcut()
+    precondition(activations == 2 && nextDefaults.object(forKey: "nextShortcutBackedUp") == nil
+        && NSDictionary(dictionary: hotkeys["61"] as! [String: Any]).isEqual(to: userNext), "and is activated again")
+    // So is an update, by the next explicit one; repair tries it once, not every second.
+    nextDefaults.set(true, forKey: "addedSources"); failing = true; activations = 0
+    try? flaky.updateNextShortcut()
+    precondition(activations == 1 && flaky.liveNextTarget == nil && nextDefaults.bool(forKey: "nextActivatePending"), "Written, not activated")
+    _ = try? flaky.followNextTarget(); _ = try? flaky.followNextTarget()
+    precondition(activations == 2, "Repair tries once")
+    failing = false; try? flaky.updateNextShortcut()
+    precondition(activations == 3 && flaky.liveNextTarget != nil && !nextDefaults.bool(forKey: "nextActivatePending"), "The next update activates it")
+    nextDefaults.set(false, forKey: "addedSources"); try? flaky.updateNextShortcut()
+    precondition(NSDictionary(dictionary: hotkeys["61"] as! [String: Any]).isEqual(to: userNext), "and off gives it back")
+    // A mapping another app made that sends its F-key, found by the first repair after launch, moves it.
+    let mappedSuite = "io.gksdud.next-mapped-tests.\(UUID().uuidString)", mappedDefaults = UserDefaults(suiteName: mappedSuite)!
+    defer { mappedDefaults.removePersistentDomain(forName: mappedSuite) }
+    let other = TestKeyboard("next", serial: "next", mappings: [mapping(0x7000000e2, targets[3].usage)])
+    hotkeys = ["61": userNext]
+    let mapped = Engine(defaults: mappedDefaults, discover: { [other] },
+                        shortcutPreferences: ShortcutPreferences(read: { hotkeys }, write: { hotkeys = $0 }, activate: { activations += 1 }),
+                        inputMenu: InputMenuPreference(read: { nil }, write: { _ in }))
+    mapped.accessibilityTrusted = { true }
+    mappedDefaults.set(true, forKey: "active"); mappedDefaults.set(true, forKey: "addedSources")
+    try? mapped.resume()
+    precondition(mapped.liveNextTarget?.name == "F16", "Before any mapping is read, F16")
+    mapped.nextFailedKey = "F16"; try? mapped.repair()
+    precondition(Engine.ownsShortcut(hotkeys["61"], keyCode: targets[0].keyCode) && mapped.liveNextTarget?.name == "F13"
+        && other.mappings.contains(mapping(0x7000000e2, targets[3].usage)) && mapped.nextFailedKey == nil,
+        "then F13, leaving F16 to the other mapping, with the failure forgotten")
+    activations = 0; try? mapped.repair()
+    precondition(activations == 0, "and it stays")
+    nextDefaults.set(false, forKey: "active")
+    precondition(nextInMenu(["us", "ko", "zh"], after: "zh") == "us" && nextInMenu(["us", "ko"], after: "us") == "ko"
+        && nextInMenu(["us"], after: "us") == nil && nextInMenu(["us", "ko"], after: "ja") == nil, "The menu's next source, round the end")
+    let measured = [InputSourceIdentity(id: "abc", language: "en"), InputSourceIdentity(id: "ko", language: "ko"),
+                    InputSourceIdentity(id: "ja", language: "ja"), InputSourceIdentity(id: "fr", language: "fr"),
+                    InputSourceIdentity(id: "de", language: "de"), InputSourceIdentity(id: "us", language: "en")]
+    let korean = Locale(identifier: "ko"), english = Locale(identifier: "en")
+    precondition(menuOrder(Array(measured.prefix(3)), locale: korean) == ["abc", "ja", "ko"]
+        && menuOrder(Array(measured.prefix(4)), locale: korean) == ["abc", "ja", "fr", "ko"]
+        && menuOrder(measured.filter { $0.id != "fr" }, locale: korean) == ["de", "abc", "us", "ja", "ko"],
+        "macOS 27 lists the sources by their language's name in Korean, as measured")
+    let guest = [InputSourceIdentity(id: "us", language: "en"), InputSourceIdentity(id: "ko", language: "ko"),
+                 InputSourceIdentity(id: "itabc", language: "zh-Hans"), InputSourceIdentity(id: "wetype", language: "zh-Hans")]
+    precondition(menuOrder(guest, locale: english) == ["itabc", "wetype", "us", "ko"], "and macOS 26 in English, as measured")
+
+    // Settings: single keys of sources turned on map while the tap can act on them.
+    let engineSuite = "io.gksdud.source-key-engine-tests.\(UUID().uuidString)"
     let engineDefaults = UserDefaults(suiteName: engineSuite)!
     defer { engineDefaults.removePersistentDomain(forName: engineSuite) }
     let engine = Engine(defaults: engineDefaults, discover: { [] })
     var trusted = true
     engine.accessibilityTrusted = { trusted }
-    engineDefaults.set(true, forKey: "addedSources"); engineDefaults.set(AddedSourceMode.separate.rawValue, forKey: "addedSourceMode")
-    engine.separateKey = option
-    precondition(engine.separateMapping == nil, "No mapping before an input source is chosen")
-    engine.separateSource = "com.apple.inputmethod.SCIM.ITABC"
-    precondition(engine.separateMapping == ExtraKey(source: option, target: f18) && engine.separateTarget.name == "F18")
+    engine.setSourceKey(option, for: "com.apple.inputmethod.SCIM.ITABC")
+    precondition(engine.sourceKeyMappings.isEmpty, "Nothing maps while added sources are off")
+    engineDefaults.set(true, forKey: "addedSources")
+    precondition(engine.sourceKeyMappings == [ExtraKey(source: option, target: f18)] && engine.sourceKeyTargets[option]?.name == "F18")
     engineDefaults.set("F18", forKey: "target")
-    precondition(engine.separateTarget.name == "F17", "Never the Korean/English key's F-key")
+    precondition(engine.sourceKeyTargets[option]?.name == "F17", "Never the Korean/English key's F-key")
+    engineDefaults.removeObject(forKey: "target")
+    engine.setSourceKey(control, for: "com.apple.keylayout.ABC")
+    precondition(engine.sourceKeyMappings.map(\.target) == [f17, f18] && engine.sourceKeyTargets[option]?.name == "F18"
+        && engine.sourceKeyTargets[control]?.name == "F17", "Each key its own F-key, in the keys' order")
+    let abc = "com.apple.keylayout.ABC", pinyin = "com.apple.inputmethod.SCIM.ITABC"
+    precondition(engine.internalKey(for: abc).map { $0.target.name == "F17" && $0.automatic } == true && engine.manualInternalKeys.isEmpty)
+    engine.setInternalKey("F16", for: abc)
+    precondition(engine.sourceKeyTargets[control]?.name == "F16" && engine.internalKey(for: abc)?.automatic == false
+        && engine.sourceKeyTargets[option]?.name == "F18" && engine.internalKeys(ignoring: abc)[control]?.target.name == "F17", "Chosen by hand")
+    engine.setInternalKey("F18", for: abc)
+    precondition(engine.sourceKeyTargets[control]?.name == "F18" && engine.sourceKeyTargets[option]?.name == "F17" && engine.internalKey(for: abc)?.automatic == false,
+        "A hand choice stays one, and the automatic ones step aside")
+    engine.setInternalKey("F18", for: pinyin)
+    precondition(engine.manualInternalKeys == [pinyin: "F18"] && engine.internalKey(for: abc)?.automatic == true, "Chosen for another source, it moves there")
+    engineDefaults.set("F18", forKey: "target")
+    precondition(engine.internalKey(for: pinyin).map { $0.automatic && $0.target.name != "F18" } == true, "Never the Korean/English key's own")
+    engineDefaults.removeObject(forKey: "target")
+    engine.setSourceKey(nil, for: pinyin)
+    precondition(engine.manualInternalKeys.isEmpty && engine.internalKey(for: pinyin) == nil, "A key added again starts automatic")
+    engine.setSourceKey(option, for: pinyin)
     trusted = false
-    precondition(engine.separateMapping == nil, "Without the tap the key keeps its function")
+    precondition(engine.sourceKeyMappings.isEmpty, "Without the tap the keys keep their function")
     trusted = true
-    engine.separateKey = spaceCombos[2]
-    precondition(engine.separateMapping == nil && engine.separateKey == spaceCombos[2], "A Space combination is not mapped")
-    engineDefaults.set(99, forKey: "separateKey")
-    precondition(engine.separateKey == nil, "An unknown saved key is no key")
-    engine.separateKey = capsLock
-    precondition(engine.capsLockSwitches(), "A Caps Lock separate key takes Caps Lock like a Korean/English one")
-    engineDefaults.set(AddedSourceMode.cycle.rawValue, forKey: "addedSourceMode")
-    precondition(!engine.capsLockSwitches() && engine.separateMapping == nil, "Cycling leaves the separate key unused")
-    engineDefaults.set(AddedSourceMode.separate.rawValue, forKey: "addedSourceMode")
-    engine.separateKey = command
-    precondition(engine.separateKeyIsHangulKey() && !engine.separateKeyIsHangulKey([option]), "The Korean/English keys, saved or about to be")
+    engine.setSourceKey(spaceCombos[2], for: "com.apple.keylayout.ABC")
+    precondition(engine.sourceKeyMappings == [ExtraKey(source: option, target: f18)] && engine.sourceKeys["com.apple.keylayout.ABC"] == spaceCombos[2],
+        "A Space combination is not mapped")
+    engine.availableSources = { ["com.apple.keylayout.ABC"] }
+    precondition(engine.sourceKeyMappings.isEmpty && engine.sourceKeys.count == 2, "A source macOS no longer offers keeps its key saved but unmapped")
+    engine.availableSources = { nil }
+    engineDefaults.set(["x": NSNumber(value: 99)], forKey: "sourceKeys")
+    precondition(engine.sourceKeys.isEmpty, "An unknown saved key is no key")
+    engine.setSourceKey(capsLock, for: "com.apple.inputmethod.SCIM.ITABC")
+    precondition(engine.capsLockSwitches(), "A Caps Lock source key takes Caps Lock like a Korean/English one")
+    engine.disabledSources = ["com.apple.inputmethod.SCIM.ITABC"]
+    precondition(!engine.capsLockSwitches() && engine.sourceKeyMappings.isEmpty, "A source turned off leaves its key unused")
+    engine.disabledSources = []
+    engine.setSourceKey(command, for: "com.apple.inputmethod.SCIM.ITABC")
+    precondition(engine.sourceKeysAmongHangulKeys() == ["com.apple.inputmethod.SCIM.ITABC": command] && engine.sourceKeysAmongHangulKeys([option]).isEmpty,
+        "The Korean/English keys, saved or about to be")
     engineDefaults.set(false, forKey: "active")
-    precondition(engine.separateMapping == nil)
-    print("PASS: separate key on its own F-key, undo, failed readback, Korean/English keys first, taken F-key, settings")
+    precondition(engine.sourceKeyMappings.isEmpty)
+    print("PASS: sources' keys on F-keys of their own, undo, failed readback, older records, Korean/English keys first, taken F-key, settings")
 }
 
-// The tap takes the separate key's F-key only while the separate key is mapped to it.
-func runSeparateKeyTapTests() {
-    let suite = "io.gksdud.separate-tap-tests.\(UUID().uuidString)"
+// The tap takes a source's key's F-key only while the key is mapped to it.
+func runSourceKeyTapTests() {
+    let suite = "io.gksdud.source-key-tap-tests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let keyboard = TestKeyboard("st-1", name: "Keyboard", serial: "separate-tap")
@@ -1015,29 +1201,45 @@ func runSeparateKeyTapTests() {
     var trusted = true
     engine.accessibilityTrusted = { trusted }
     defaults.set(true, forKey: "active")
-    defaults.set(true, forKey: "addedSources"); defaults.set(AddedSourceMode.separate.rawValue, forKey: "addedSourceMode")
-    engine.separateKey = sources[1]; engine.separateSource = "com.apple.inputmethod.SCIM.ITABC"
+    defaults.set(true, forKey: "addedSources")
+    let pinyin = "com.apple.inputmethod.SCIM.ITABC", abc = "com.apple.keylayout.ABC"
+    engine.setSourceKey(sources[1], for: pinyin); engine.setSourceKey(sources[3], for: abc); engine.setSourceKey(spaceCombos[2], for: "ko")
     let delegate = AppDelegate(engine: engine)
-    let target = engine.separateTarget, code = Int64(target.keyCode)
-    func reconcile() { engine.keyboards.reconcile(sources: [sources[0]], target: f19, active: true, extra: engine.separateMapping) }
+    let target = engine.sourceKeyTargets[sources[1]]!, code = Int64(target.keyCode), other = Int64(engine.sourceKeyTargets[sources[3]]!.keyCode)
+    func reconcile() { engine.keyboards.reconcile(sources: [sources[0]], target: f19, active: true, extras: engine.sourceKeyMappings) }
     reconcile()
-    precondition(delegate.takesSeparateKey(code) && !delegate.takesSeparateKey(Int64(engine.target.keyCode)), "The mapped separate key's F-key is taken")
+    precondition(delegate.takesSourceKey(code) && delegate.takesSourceKey(other) && !delegate.takesSourceKey(Int64(engine.target.keyCode)),
+        "The mapped keys' F-keys are taken")
+    precondition(delegate.sourceKeyTarget(code) == pinyin && delegate.sourceKeyTarget(other) == abc && delegate.sourceKeyTarget(0) == nil,
+        "Each F-key goes to its source")
+    precondition(delegate.sourceCombos == [spaceCombos[2]: "ko"], "A combination goes to its source")
+    engine.defaultSources = [sources[0], spaceCombos[2]]
+    precondition(delegate.sourceCombos.isEmpty, "A Korean/English combination wins")
+    engine.defaultSources = [sources[0]]
     // Caps Lock already sends that F-key for another app.
     keyboard.mappings.append([srcKey: NSNumber(value: sources[2]), dstKey: NSNumber(value: target.usage)])
     reconcile()
-    precondition(engine.keyboards.result.extraBlocked == 1 && !delegate.takesSeparateKey(code), "A taken F-key stays the other mapping's")
+    precondition(engine.keyboards.result.extraBlocked == 1 && !delegate.takesSourceKey(code) && delegate.takesSourceKey(other), "A taken F-key stays the other mapping's")
     keyboard.mappings.removeAll { $0[srcKey]?.uint64Value == sources[2] }
     reconcile()
-    precondition(delegate.takesSeparateKey(code), "Freed again, it is taken again")
+    precondition(delegate.takesSourceKey(code), "Freed again, it is taken again")
+    let gone = InputSourceIdentity(id: "io.gksdud.test.gone", language: "ja"), here = InputSourceIdentity(id: "io.gksdud.test.here", language: "ko")
+    delegate.sourceCache = (list: [gone, here], layouts: [])
+    precondition(!delegate.switchSource(to: gone, from: here, pulse: (CGEvent(source: nil)!, CGEvent(source: nil)!))
+        && delegate.switchLanding == nil && delegate.sourceCache?.list.contains(gone) != true,
+        "A source that is gone is not switched to, the shortcut is not sent, and macOS's list is read again")
+    engine.disabledSources = [pinyin]
+    precondition(!delegate.takesSourceKey(code) || delegate.sourceKeyTarget(code) != pinyin, "Turned off, its key is not taken")
+    engine.disabledSources = []
     trusted = false
-    precondition(!delegate.takesSeparateKey(code), "Without Accessibility nothing is taken")
-    print("PASS: separate key's F-key taken only while mapped, left to another mapping that sends it")
+    precondition(!delegate.takesSourceKey(code) && delegate.sourceCombos.isEmpty, "Without Accessibility nothing is taken")
+    print("PASS: sources' keys' F-keys taken only while mapped, left to another mapping that sends them, each to its source")
 }
 
-// Warnings when the separate key and a Korean/English key meet, from either side.
-func runSeparateKeyWarningTests() {
+// Warnings when a source's key and a Korean/English key meet, from either side.
+func runSourceKeyWarningTests() {
     _ = NSApplication.shared
-    let suite = "io.gksdud.separate-warning-tests.\(UUID().uuidString)"
+    let suite = "io.gksdud.source-key-warning-tests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     let keyboard = TestKeyboard("sw-1", name: "Keyboard", serial: "separate-warning")
@@ -1049,74 +1251,100 @@ func runSeparateKeyWarningTests() {
     let untouched = ShortcutPreferences(read: { systemShortcuts }, write: { _ in }, activate: {})
     let engine = Engine(defaults: defaults, discover: { [keyboard] }, shortcutPreferences: untouched)
     defaults.set(false, forKey: "active")
-    defaults.set(true, forKey: "addedSources"); defaults.set(AddedSourceMode.separate.rawValue, forKey: "addedSourceMode")
+    defaults.set(true, forKey: "addedSources")
     _ = try? engine.keyboards.snapshot()
     let delegate = AppDelegate(engine: engine)
     delegate.buildWindow()
+    let pinyin = "com.apple.inputmethod.SCIM.ITABC", abc = "com.apple.keylayout.ABC"
     var answers: [NSApplication.ModalResponse] = [], warnings: [String] = []
     delegate.runAlert = { alert in
         warnings.append(alert.messageText)
         return answers.isEmpty ? .alertSecondButtonReturn : answers.removeFirst()
     }
-    let keyPicker = delegate.addedSources.keyPicker
-    func chooseSeparate(_ title: String, _ replies: [NSApplication.ModalResponse] = []) {
+    func choose(_ key: UInt64?, for id: String = pinyin, _ replies: [NSApplication.ModalResponse] = []) {
         answers = replies; warnings = []
-        delegate.addedSources.refresh(force: true)
-        keyPicker.selectItem(withTitle: title)
-        precondition(keyPicker.sendAction(keyPicker.action, to: keyPicker.target))
+        delegate.addedSources.setKey(key, for: id)
     }
-    chooseSeparate(sourceNames[0])
-    precondition(warnings == ["\(sourceNames[0])은 한영 키로 사용 중입니다."] && engine.separateKey == nil, "A Korean/English key cannot be the separate key")
-    chooseSeparate(sourceNames[1])
-    precondition(warnings.isEmpty && engine.separateKey == sources[1] && keyPicker.titleOfSelectedItem == sourceNames[1])
-    // From the Korean/English side: cancel keeps both, confirm clears the separate key.
-    let separateWarning = "\(sourceNames[1])은 입력 소스 추가의 전환 키입니다."
+    choose(sources[0])
+    precondition(warnings == ["\(sourceNames[0])은 한영 키로 사용 중입니다."] && engine.sourceKeys.isEmpty, "A Korean/English key cannot be a source's key")
+    choose(sources[1])
+    precondition(warnings.isEmpty && engine.sourceKeys == [pinyin: sources[1]])
+    choose(sources[1], for: abc)
+    precondition(warnings.isEmpty && engine.sourceKeys == [abc: sources[1]], "Moved from another source, it was confirmed there")
+    choose(sources[1])
+    // From the Korean/English side: cancel keeps both, confirm clears the source's key.
+    let sourceWarning = "\(sourceNames[1])은 \(AppDelegate.sourceTitle(pinyin))의 전용 전환 키입니다."
     answers = []; warnings = []
     delegate.picker.selectItem(withTitle: sourceNames[1])
     precondition(delegate.picker.sendAction(delegate.picker.action, to: delegate.picker.target))
-    precondition(warnings == [separateWarning] && engine.defaultSources == [sources[0]] && engine.separateKey == sources[1], "Cancel keeps both keys")
+    precondition(warnings == [sourceWarning] && engine.defaultSources == [sources[0]] && engine.sourceKeys == [pinyin: sources[1]], "Cancel keeps both keys")
     answers = [.alertFirstButtonReturn]; warnings = []
     delegate.picker.selectItem(withTitle: sourceNames[1])
     precondition(delegate.picker.sendAction(delegate.picker.action, to: delegate.picker.target))
-    precondition(engine.defaultSources == [sources[1]] && engine.separateKey == nil, "Confirming makes it a Korean/English key only")
+    precondition(engine.defaultSources == [sources[1]] && engine.sourceKeys.isEmpty, "Confirming makes it a Korean/English key only")
     engine.defaultSources = [sources[0]]; delegate.resetSelection()
-    chooseSeparate(sourceNames[1])
+    choose(sources[1])
     // The keyboard sheet saves first and undoes a cancelled change.
     let key = keyboard.identity.key
     answers = []; warnings = []
     engine.keyboards.setSources([sources[1]], for: key)
     if !delegate.confirmKeyboardChange([key]) { engine.keyboards.setSources(nil, for: key) }
-    precondition(warnings == [separateWarning] && engine.keyboards.known[key]?.sources == nil && engine.separateKey == sources[1])
+    precondition(warnings == [sourceWarning] && engine.keyboards.known[key]?.sources == nil && engine.sourceKeys == [pinyin: sources[1]])
     answers = [.alertFirstButtonReturn]
     engine.keyboards.setSources([sources[1]], for: key)
-    precondition(delegate.confirmKeyboardChange([key]) && engine.separateKey == nil, "One keyboard's key is enough to clear it")
+    precondition(delegate.confirmKeyboardChange([key]) && engine.sourceKeys.isEmpty, "One keyboard's key is enough to clear it")
     engine.keyboards.setSources(nil, for: key)
+    // A key saved for a source macOS no longer offers asks nothing, and goes once it is a Korean/English key.
+    engine.setSourceKey(sources[1], for: "com.example.Removed"); engine.availableSources = { [pinyin, abc] }
+    answers = []; warnings = []
+    delegate.picker.selectItem(withTitle: sourceNames[1])
+    precondition(delegate.picker.sendAction(delegate.picker.action, to: delegate.picker.target))
+    precondition(warnings.isEmpty && engine.defaultSources == [sources[1]] && engine.sourceKeys.isEmpty, "A removed source's key is cleared quietly")
+    engine.defaultSources = [sources[0]]; delegate.resetSelection(); engine.availableSources = { nil }
     // Caps Lock stops being Caps Lock, so Caps Lock in Korean asks first.
     defaults.set(true, forKey: "koreanCapsLock")
-    chooseSeparate(sourceNames[2])
-    precondition(warnings == ["Caps Lock을 전환 키로 사용합니다."] && engine.separateKey == nil && engine.koreanCapsLock, "Cancel keeps Caps Lock in Korean")
-    chooseSeparate(sourceNames[2], [.alertFirstButtonReturn])
-    precondition(engine.separateKey == sources[2] && !engine.koreanCapsLock, "Confirming turns Caps Lock in Korean off")
+    choose(sources[2])
+    precondition(warnings == ["Caps Lock을 전용 전환 키로 사용합니다."] && engine.sourceKeys.isEmpty && engine.koreanCapsLock, "Cancel keeps Caps Lock in Korean")
+    choose(sources[2], [.alertFirstButtonReturn])
+    precondition(engine.sourceKeys == [pinyin: sources[2]] && !engine.koreanCapsLock, "Confirming turns Caps Lock in Korean off")
+    // A source turned off and back on asks again for its key.
+    defaults.set(true, forKey: "koreanCapsLock")
+    precondition(delegate.addedSources.setSource(pinyin, on: false) && engine.disabledSources == [pinyin] && engine.koreanCapsLock)
+    warnings = []; answers = []
+    precondition(!delegate.addedSources.setSource(pinyin, on: true) && warnings == ["Caps Lock을 전용 전환 키로 사용합니다."] && engine.disabledSources == [pinyin],
+        "Cancel keeps it off")
+    answers = [.alertFirstButtonReturn]
+    precondition(delegate.addedSources.setSource(pinyin, on: true) && engine.disabledSources.isEmpty && !engine.koreanCapsLock)
     // Another app's mapping of the key.
     keyboard.mappings = [[srcKey: NSNumber(value: sources[3]), dstKey: NSNumber(value: UInt64(0x7000000e2))]]
-    chooseSeparate(sourceNames[3])
-    precondition(warnings == ["\(sourceNames[3])에 다른 매핑이 있습니다."] && engine.separateKey == sources[2], "Cancel keeps the old key")
-    chooseSeparate(sourceNames[3], [.alertFirstButtonReturn])
-    precondition(engine.separateKey == sources[3])
-    chooseSeparate("선택 안 함")
-    precondition(engine.separateKey == nil && warnings.isEmpty)
+    choose(sources[3])
+    precondition(warnings == ["\(sourceNames[3])에 다른 매핑이 있습니다."] && engine.sourceKeys == [pinyin: sources[2]], "Cancel keeps the old key")
+    choose(sources[3], [.alertFirstButtonReturn])
+    precondition(engine.sourceKeys == [pinyin: sources[3]])
+    choose(nil)
+    precondition(engine.sourceKeys.isEmpty && warnings.isEmpty)
     // A system shortcut on the same Space combination; a disabled one does not count.
-    chooseSeparate(spaceComboNames[1])
-    precondition(warnings == ["\(spaceComboNames[1])은 시스템 단축키에서 사용 중입니다."] && engine.separateKey == nil, "Cancel keeps Spotlight")
-    chooseSeparate(spaceComboNames[1], [.alertFirstButtonReturn])
-    precondition(engine.separateKey == spaceCombos[1])
-    chooseSeparate(spaceComboNames[0])
-    precondition(warnings.isEmpty && engine.separateKey == spaceCombos[0], "Only enabled shortcuts count")
-    chooseSeparate(spaceComboNames[3])
-    precondition(warnings == ["\(spaceComboNames[3])은 시스템 단축키에서 사용 중입니다."] && engine.separateKey == spaceCombos[0], "Cancel keeps the key when Shift+Space is already used")
-    chooseSeparate(spaceComboNames[3], [.alertFirstButtonReturn])
-    precondition(engine.separateKey == spaceCombos[3], "Confirming allows Shift+Space as the separate key")
-    // Preservation off turns Caps Lock in Korean off with it, so Caps Lock as a separate key no longer warns about it.
+    choose(spaceCombos[1])
+    precondition(warnings == ["\(spaceComboNames[1])은 시스템 단축키에서 사용 중입니다."] && engine.sourceKeys.isEmpty, "Cancel keeps Spotlight")
+    choose(spaceCombos[1], [.alertFirstButtonReturn])
+    precondition(engine.sourceKeys == [pinyin: spaceCombos[1]])
+    choose(spaceCombos[0])
+    precondition(warnings.isEmpty && engine.sourceKeys == [pinyin: spaceCombos[0]], "Only enabled shortcuts count")
+    choose(spaceCombos[3])
+    precondition(warnings == ["\(spaceComboNames[3])은 시스템 단축키에서 사용 중입니다."] && engine.sourceKeys == [pinyin: spaceCombos[0]],
+        "Cancel keeps the key when Shift+Space is already used")
+    choose(spaceCombos[3], [.alertFirstButtonReturn])
+    precondition(engine.sourceKeys == [pinyin: spaceCombos[3]], "Confirming allows Shift+Space as a source's key")
+    // Turning added sources on asks about the keys too.
+    defaults.set(false, forKey: "addedSources"); engine.setSourceKey(spaceCombos[1], for: pinyin)
+    delegate.addedSources.refresh(force: true)
+    answers = []; warnings = []
+    delegate.addedSources.enable.state = .on; delegate.addedSources.toggle()
+    precondition(warnings == ["\(spaceComboNames[1])은 시스템 단축키에서 사용 중입니다."] && !engine.addedSourcesEnabled, "Cancel keeps it off")
+    answers = [.alertFirstButtonReturn]
+    delegate.addedSources.enable.state = .on; delegate.addedSources.toggle()
+    precondition(engine.addedSourcesEnabled)
+    // Preservation off turns Caps Lock in Korean off with it, so Caps Lock as a source's key no longer warns about it.
     defaults.set(true, forKey: "preserveCapsLock"); defaults.set(true, forKey: "koreanCapsLock")
     delegate.preserveCapsSwitch.state = .off; delegate.toggleFeature(delegate.preserveCapsSwitch)
     precondition(!defaults.bool(forKey: "preserveCapsLock") && !defaults.bool(forKey: "koreanCapsLock"))
@@ -1125,12 +1353,13 @@ func runSeparateKeyWarningTests() {
     defaults.set(false, forKey: "preserveCapsLock"); defaults.set(true, forKey: "koreanCapsLock")
     delegate.turnOffUnusedKoreanCaps()
     precondition(!defaults.bool(forKey: "koreanCapsLock"), "A choice saved before this is cleared at launch")
-    chooseSeparate(sourceNames[2])
-    precondition(warnings.isEmpty && engine.separateKey == sources[2])
-    chooseSeparate(spaceComboNames[0])
-    // The F-key the tap takes for the separate key avoids one a system shortcut uses alone; saving a choice reads them.
-    precondition(engine.systemFKeys == [79] && engine.separateTarget.name == "F17", "F18 has a system shortcut")
-    print("PASS: separate key against Korean/English keys from both sides, the keyboard sheet, Caps Lock in Korean, other mappings, system shortcuts, Caps Lock in Korean off with preservation")
+    choose(sources[2])
+    precondition(warnings.isEmpty && engine.sourceKeys == [pinyin: sources[2]])
+    choose(spaceCombos[0])
+    // The F-keys the tap takes for sources' keys avoid ones a system shortcut uses alone; saving a choice reads them.
+    engine.setSourceKey(sources[1], for: abc)
+    precondition(engine.systemFKeys == [79] && engine.sourceKeyTargets[sources[1]]?.name == "F17", "F18 has a system shortcut")
+    print("PASS: sources' keys against Korean/English keys from both sides, the keyboard sheet, Caps Lock in Korean, turning sources and the feature on, other mappings, system shortcuts")
 }
 // Without Accessibility there is nothing to switch with: activation turns off and only the permission button and the
 // gksdud tab stay usable. Granting it again leaves activation off until turned on.
@@ -1232,7 +1461,8 @@ func runPermissionTests() {
         let lower = badge(english, caps: false), upper = badge(english, caps: true)
         precondition(lower !== upper && delegate.englishPreview.image === upper, "On, English and its preview follow Caps Lock")
         precondition(badge(korean, caps: true) === badge(korean, caps: false) && badge(japanese, caps: true) === badge(japanese, caps: false)
-            && delegate.inputBadge.image === delegate.badgeImage(label: "JA", filled: false), "Other sources stay as they were")
+            && delegate.inputBadge.image === (delegate.cachedNativeIcon(japanese.source.id) ?? delegate.badgeImage(label: "JA", filled: false)),
+            "Other sources stay as they were, in their own icons")
         precondition(badge(english, caps: true) === upper, "The same icon is kept, not drawn again")
     }
     // Hiding the menu bar icon keeps the choice but turns it off and dims it, as with replacing the Mac input menu.

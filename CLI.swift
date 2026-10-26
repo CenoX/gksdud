@@ -15,7 +15,6 @@ enum CLI {
         case keys(single: Bool)
         case key
         case sources
-        case source
         var isList: Bool { if case .keys = self { return true }; return self == .sources }
     }
     struct Setting { let name: String; let kind: Kind; let title: String }
@@ -25,14 +24,14 @@ enum CLI {
     static let keyNames = ["right-command", "right-option", "caps-lock", "right-control", "ctrl-space", "cmd-space", "opt-space", "shift-space"]
     static let singleKeyNames = Array(keyNames.prefix(4))
     static let iconNames = ["dud", "a", "ko-en", "character"]
-    static let targetNames = (13...20).map { "F\($0)" }
+    static let targetNames = (13...20).map { "F\($0)" }, switchTargetNames = Array(targetNames.dropLast())
     static let specialNames = ["off", "english", "block"]
     static let settings: [Setting] = [
         Setting(name: "active", kind: .bool, title: "활성화"),
         Setting(name: "paused", kind: .bool, title: "일시정지 (앱을 다시 실행하면 풀림)"),
         Setting(name: "login", kind: .bool, title: "로그인 시 시작"),
         Setting(name: "keys", kind: .keys(single: false), title: "한영 키"),
-        Setting(name: "target", kind: .choice(targetNames), title: "내부 전환 키 (고급 설정)"),
+        Setting(name: "target", kind: .choice(switchTargetNames), title: "내부 전환 키 (고급 설정)"),
         Setting(name: "keyboard-default", kind: .bool, title: "키보드 기본값 (고급 설정)"),
         Setting(name: "menubar", kind: .bool, title: "메뉴바에 표시"),
         Setting(name: "replace-input-menu", kind: .bool, title: "Mac 입력기 아이콘 대체"),
@@ -43,12 +42,10 @@ enum CLI {
         Setting(name: "korean-caps-lock", kind: .bool, title: "한글 상태에서도 Caps Lock으로 대소문자 전환"),
         Setting(name: "special-chars", kind: .choice(specialNames), title: "특수문자 (끔, 영어처럼 입력, Option 문자 입력 차단)"),
         Setting(name: "backquote", kind: .bool, title: "한글 상태에서 ₩와 ` 반전"),
-        Setting(name: "added-sources", kind: .bool, title: "입력 소스 추가"),
-        Setting(name: "added-mode", kind: .choice(["cycle", "separate"]), title: "입력 소스 추가 전환 방식 (순회, 분리)"),
-        Setting(name: "cycle", kind: .sources, title: "순회 순서"),
-        Setting(name: "separate-key", kind: .key, title: "분리 전환 키"),
-        Setting(name: "separate-source", kind: .source, title: "분리로 전환할 입력 소스"),
-        Setting(name: "compatibility", kind: .bool, title: "입력 소스 추가 호환성 모드"),
+        Setting(name: "added-sources", kind: .bool, title: "입력 소스 관리"),
+        Setting(name: "cycle", kind: .sources, title: "한영 키로 순환할 입력 소스와 순서"),
+        Setting(name: "source-key-return", kind: .bool, title: "전용 전환 키를 한 번 더 누를 시 직전 입력 소스로 전환"),
+        Setting(name: "compatibility", kind: .bool, title: "입력 소스 관리 호환성 모드"),
         Setting(name: "escape", kind: .bool, title: "ESC 누를 시 영소문자로 변경"),
         Setting(name: "universal-control", kind: .bool, title: "유니버설 컨트롤 호환 모드"),
     ]
@@ -57,12 +54,19 @@ enum CLI {
         Setting(name: "mode", kind: .choice(["on", "default", "off"]), title: "키보드별 적용"),
         Setting(name: "keys", kind: .keys(single: true), title: "키보드별 한영 키 (default면 기본 한영 키를 따름)"),
     ]
+    // source.<input source>.enabled and source.<input source>.key.
+    static let sourceSettings: [Setting] = [
+        Setting(name: "enabled", kind: .bool, title: "입력 소스별 활성화 (입력 소스 관리)"),
+        Setting(name: "key", kind: .key, title: "입력 소스별 전용 전환 키"),
+        Setting(name: "internal-key", kind: .choice(["auto"] + targetNames), title: "입력 소스별 내부 키 (단일 전용 전환 키가 보내는 F-키)"),
+    ]
 
-    // A setting the arguments name: a global one, or one of the keyboards a selector picks.
+    // A setting the arguments name: a global one, one of the keyboards a selector picks, or an input source's.
     struct Address: Equatable {
         let name: String
         let keyboard: String?
-        var label: String { keyboard.map { "keyboard.\($0).\(name)" } ?? name }
+        var source: String? = nil
+        var label: String { keyboard.map { "keyboard.\($0).\(name)" } ?? source.map { "source.\($0).\(name)" } ?? name }
     }
     enum Operation: String { case set = "=", add = "+=", remove = "-=" }
     struct Change: Equatable { let address: Address; let operation: Operation; let value: Value }
@@ -149,6 +153,12 @@ enum CLI {
            let setting = keyboardSettings.first(where: { $0.name == rest[rest.index(after: dot)...] }) {
             return (Address(name: setting.name, keyboard: String(rest[..<dot])), setting)
         }
+        // So can an input source's ID.
+        let field = text.dropFirst("source.".count)
+        if text.hasPrefix("source."), let dot = field.lastIndex(of: "."), dot > field.startIndex,
+           let setting = sourceSettings.first(where: { $0.name == field[field.index(after: dot)...] }) {
+            return (Address(name: setting.name, keyboard: nil, source: String(field[..<dot])), setting)
+        }
         throw UsageError("알 수 없는 설정: \(text). gksdud help settings로 설정을 확인하세요.")
     }
 
@@ -186,10 +196,6 @@ enum CLI {
         case .sources:
             guard !list.isEmpty else { throw invalid }
             return .list(list)
-        case .source:
-            if lower == "none" { return .none }
-            guard !text.isEmpty else { throw invalid }
-            return .text(text)
         }
     }
 
@@ -200,7 +206,6 @@ enum CLI {
         case .keys(let single): return single ? "<키>,...|default" : "<키>,..."
         case .key: return "<키>|none"
         case .sources: return "<입력 소스>,..."
-        case .source: return "<입력 소스>|none"
         }
     }
     static func text(_ value: Value, _ kind: Kind) -> String {
@@ -260,6 +265,7 @@ enum CLI {
     static var settingsHelp: String {
         let rows = settings.map { ($0.name, values($0.kind), $0.title) }
             + keyboardSettings.map { ("keyboard.<키보드>.\($0.name)", values($0.kind), $0.title) }
+            + sourceSettings.map { ("source.<입력 소스>.\($0.name)", values($0.kind), $0.title) }
         let nameWidth = rows.map { width($0.0) }.max()!, valueWidth = rows.map { width($0.1) }.max()!
         return (rows.map { "\(pad($0.0, nameWidth))  \(pad($0.1, valueWidth))  \($0.2)" } + ["",
             "<키>: \(keyNames.joined(separator: ", "))",
@@ -279,7 +285,8 @@ enum CLI {
         func describe(_ setting: Setting, _ name: String) -> [String: Any] {
             ["name": name, "values": values(setting.kind), "list": setting.kind.isList, "description": setting.title]
         }
-        return ["settings": settings.map { describe($0, $0.name) } + keyboardSettings.map { describe($0, "keyboard.<키보드>.\($0.name)") },
+        return ["settings": settings.map { describe($0, $0.name) } + keyboardSettings.map { describe($0, "keyboard.<키보드>.\($0.name)") }
+                    + sourceSettings.map { describe($0, "source.<입력 소스>.\($0.name)") },
                 "keys": keyNames, "keyboard_keys": singleKeyNames]
     }
 }

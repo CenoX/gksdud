@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIM = r'''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, sys, shutil
 command = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 root = pathlib.Path(os.environ["TEST_ROOT"])
@@ -24,10 +24,13 @@ if command == "mktemp":
 elif command == "swiftc" or command == "lipo":
     flag = "-o" if command == "swiftc" else "-output"
     target = pathlib.Path(args[args.index(flag) + 1])
-    target.write_text("#!/bin/sh\nexit 0\n")
+    target.write_text('#!/bin/sh\nif [ "$1" = set ]; then exit 2; fi\nexit 0\n')
     target.chmod(0o755)
 elif command == "ditto":
-    pathlib.Path(args[-1]).write_bytes(b"mock archive")
+    if len(args) == 2 and pathlib.Path(args[0]).is_dir():
+        shutil.copytree(args[0], args[1])
+    else:
+        pathlib.Path(args[-1]).write_bytes(b"mock archive")
 elif command == "xcrun" and args[:2] == ["notarytool", "history"]:
     if failure == "credentials":
         sys.exit(1)
@@ -54,6 +57,8 @@ class NotarizationTests(unittest.TestCase):
         shutil.copy2(ROOT / "build.sh", self.source)
         shutil.copy2(ROOT / "Info.plist", self.source)
         shutil.copy2(ROOT / "LICENSE", self.source)
+        (self.source / "signing").mkdir()
+        shutil.copy2(ROOT / "signing/developer-team-id", self.source / "signing")
         shutil.copytree(ROOT / "Resources", self.source / "Resources")
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -72,6 +77,7 @@ class NotarizationTests(unittest.TestCase):
         env.update(PATH=f"{self.bin}:{env['PATH']}", TEST_ROOT=str(self.root), TEST_FAILURE=failure,
                    GKSDUD_SIGN_MODE=mode, GKSDUD_SIGN_IDENTITY="A" * 40,
                    GKSDUD_NOTARIZE=notarize, GKSDUD_NOTARY_PROFILE="fixture-profile",
+                   GKSDUD_APP_VERSION="1.3.2", GKSDUD_CHANNEL="stable",
                    GKSDUD_NOTARY_KEYCHAIN="/private/tmp/fixture.keychain-db",
                    GKSDUD_OUTPUT_DIR=str(self.output))
         result = subprocess.run(["/bin/bash", str(self.source / "build.sh")], env=env,
@@ -95,7 +101,9 @@ class NotarizationTests(unittest.TestCase):
         self.assertIn("--wait", calls[submit])
         self.assertIn("fixture-profile", calls[submit])
         self.assertIn("/private/tmp/fixture.keychain-db", calls[submit])
-        self.assertEqual(len(list(self.output.glob("*.zip"))), 1)
+        self.assertEqual(len(list(self.output.glob("*.zip"))), 2)
+        self.assertEqual((self.output / "gksdud-1.3.2.zip").read_bytes(),
+                         (self.output / "gksdud-1.3.2-macos-universal.zip").read_bytes())
 
     def test_each_failure_preserves_previous_archive(self):
         for failure in ["credentials", "submit", "invalid", "staple", "validate", "gatekeeper"]:
@@ -114,7 +122,7 @@ class NotarizationTests(unittest.TestCase):
         result, calls = self.build(mode="ad-hoc")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires Developer ID", result.stderr)
-        self.assertEqual(calls, [])
+        self.assertFalse(any(c[0] == "swiftc" for c in calls))
 
     def test_development_build_does_not_contact_apple(self):
         result, calls = self.build(notarize="0", mode="ad-hoc")

@@ -25,6 +25,30 @@ struct OptionKeyPolicy {
     }
 }
 
+// In Korean, ₩ and ` trade places as in English: the key alone types `, with Option ₩. Only the Option flag changes, and
+// the Korean input method types both (Option+₩ is ` there), so a composition ends as with any symbol. Shift (~) and
+// shortcuts stay.
+struct BackquoteSwap {
+    private(set) var swapping = false
+    static let leftOption = CGEventFlags(rawValue: 0x20), anyOption = CGEventFlags(rawValue: CGEventFlags.maskAlternate.rawValue | 0x60)
+    // 3-set final types * on that key, with ` under Option; no ₩ to trade.
+    static func swaps(_ source: InputSourceIdentity?) -> Bool {
+        guard let id = source?.id else { return false }
+        return id.hasPrefix("com.apple.inputmethod.Korean") && id != "com.apple.inputmethod.Korean.3SetKorean"
+    }
+    // Repeats and the release follow their press, even when the source changed meanwhile.
+    mutating func handle(code: Int64, down: Bool, repeated: Bool, flags: inout CGEventFlags, korean: () -> Bool) {
+        guard code == Int64(kVK_ANSI_Grave) else { return }
+        if down && !repeated {
+            swapping = flags.intersection([.maskShift, .maskCommand, .maskControl, .maskSecondaryFn]).isEmpty && korean()
+        }
+        guard swapping else { return }
+        if !down { swapping = false }
+        if flags.contains(.maskAlternate) { flags.remove(Self.anyOption) } else { flags.insert([.maskAlternate, Self.leftOption]) }
+    }
+    mutating func reset() { swapping = false }
+}
+
 final class OptionInputController {
     struct Environment {
         var current: () -> InputSourceIdentity?
@@ -228,13 +252,26 @@ extension AppDelegate {
     }
     func refreshSpecialMode() {
         for button in specialButtons { button.state = button.tag == specialMode.rawValue ? .on : .off }
-        specialStatus.stringValue = ""
+        showSpecialStatus("")
     }
+    // Held keys go through here as they are let go, in the source they land on.
+    func swapBackquote(_ event: CGEvent) {
+        guard event.type == .keyDown || event.type == .keyUp else { return }
+        var flags = event.flags
+        backquote.handle(code: event.getIntegerValueField(.keyboardEventKeycode), down: event.type == .keyDown,
+            repeated: event.getIntegerValueField(.keyboardEventAutorepeat) != 0, flags: &flags) {
+            engine.active && engine.swapBackquote && BackquoteSwap.swaps(currentSource)
+        }
+        if flags != event.flags { event.flags = flags }
+    }
+    // Empty, it takes no room between the sections.
+    func showSpecialStatus(_ text: String) { specialStatus.stringValue = text; specialStatus.isHidden = text.isEmpty }
+    // Some input methods name no language; they are sources all the same.
     static func sourceIdentity(_ source: TISInputSource) -> InputSourceIdentity? {
-        guard let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID),
-              let languages = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages) else { return nil }
-        return InputSourceIdentity(id: Unmanaged<CFString>.fromOpaque(id).takeUnretainedValue() as String,
-            language: (Unmanaged<CFArray>.fromOpaque(languages).takeUnretainedValue() as? [String])?.first ?? "")
+        guard let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+        let languages = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages)
+            .flatMap { Unmanaged<CFArray>.fromOpaque($0).takeUnretainedValue() as? [String] }
+        return InputSourceIdentity(id: Unmanaged<CFString>.fromOpaque(id).takeUnretainedValue() as String, language: languages?.first ?? "")
     }
     static func sourceForID(_ id: String) -> TISInputSource? {
         // macOS may return nil (not an empty array) when this source is unavailable.
@@ -248,9 +285,11 @@ extension AppDelegate {
             if let current = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
                let identity = Self.sourceIdentity(current), identity.language.hasPrefix("en") { return identity }
             return self?.availableSource("en").flatMap(Self.sourceIdentity)
-        }, select: { identity in
-            guard let source = Self.sourceForID(identity.id) else { return false }
-            return TISSelectInputSource(source) == noErr
+        }, select: { [weak self] identity in
+            guard let source = Self.sourceForID(identity.id), TISSelectInputSource(source) == noErr else { return false }
+            // A round trip that returns before its notifications are read still reorders the recent sources.
+            self?.sourceHistory.note(identity.id)
+            return true
         }, frontmost: { NSWorkspace.shared.frontmostApplication?.processIdentifier }, post: { event in
             event.post(tap: .cghidEventTap)
         }, later: { delay, action in
@@ -271,7 +310,7 @@ extension AppDelegate {
             // character. Only a zero-length result means another stroke is pending.
             return result == noErr ? (length == 0 ? next : 0) : nil
         }), marker: nativePulseMarker)
-        controller.report = { [weak self] text in self?.specialStatus.stringValue = text }
+        controller.report = { [weak self] text in self?.showSpecialStatus(text) }
         controller.willBegin = { [weak self] in self?.cancelLongPress(); self?.cancelCapsRestore(); self?.refreshSpecialMode() }
         controller.didFinish = { [weak self] in
             DispatchQueue.main.async { self?.updateInputIndicator(); self?.scheduleCapsRestore() }

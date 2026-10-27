@@ -1,7 +1,9 @@
 require 'minitest/autorun'
+require 'yaml'
 require 'json'
 require 'tmpdir'
 require 'open3'
+require 'fileutils'
 require_relative 'release-metadata'
 require_relative 'resolve-release'
 
@@ -9,8 +11,15 @@ class ReleaseTests < Minitest::Test
   ROOT = File.expand_path('..', __dir__)
 
   def test_tag_must_match_numeric_app_version
-    %w[main v1.2.1 pre-v.1.2.1 pre-v1.2.1 pre-v1.2.0-beta.1 pre-v.1.2.0-beta.1 ../1.2.0].each do |tag|
+    %w[main v1.2.1 pre-v1.2.0 canary-v1.2.0 v.1.2.0 1.2.0 v1.2.0-beta.1 ../1.2.0].each do |tag|
       assert_raises(ArgumentError) { ReleaseMetadata.new('1.2.0', tag) }
+    end
+    # Every tag is vVERSION; stable releases have three fields, prereleases four with the fourth from 1, canary releases five
+    # with the fifth from 1.
+    assert_equal %w[stable pre canary canary], %w[1.2.0 1.2.0.1 1.2.0.1.3 1.2.1.0.1].map { |version| ReleaseMetadata.new(version).channel }
+    [%w[1.2.0.1 pre-v1.2.0.1], %w[1.2.0.1.3 canary-v1.2.0.1.3], %w[1.2.0.0 v1.2.0.0], %w[1.2.0.01 v1.2.0.01], %w[1.2.0.1.0 v1.2.0.1.0],
+     %w[1.2.0.1.1.1 v1.2.0.1.1.1]].each do |version, tag|
+      assert_raises(ArgumentError) { ReleaseMetadata.new(version, tag) }
     end
     ["1.2.0\n", '1.2', '1.2.0-beta.1', '01.2.0', '1.02.0', '1.2.00'].each do |version|
       assert_raises(ArgumentError) { ReleaseMetadata.new(version) }
@@ -19,15 +28,25 @@ class ReleaseTests < Minitest::Test
 
   def test_stable_and_prerelease_assets_are_separate
     stable = ReleaseMetadata.new('1.2.0', 'v1.2.0')
-    pre = ReleaseMetadata.new('1.2.0', 'pre-v1.2.0')
+    pre = ReleaseMetadata.new('1.2.0.1', 'v1.2.0.1')
+    canary = ReleaseMetadata.new('1.2.0.1.3', 'v1.2.0.1.3')
     refute stable.prerelease?
     assert pre.prerelease?
-    assert_equal 'gksdud-1.2.0-macos-universal.zip', stable.filename
-    assert_equal 'gksdud-1.2.0-pre-macos-universal.zip', pre.filename
-    refute_equal stable.asset_version, pre.asset_version
-    legacy = ReleaseMetadata.new('1.2.0', 'pre-v.1.2.0')
-    assert legacy.prerelease?
-    assert_equal pre.filename, legacy.filename
+    assert canary.prerelease?
+    assert_equal 'gksdud-1.2.0.zip', stable.filename
+    # The name an app takes for the version it updates to.
+    assert_equal 'gksdud-1.2.0.1.zip', pre.filename
+    assert_equal 'gksdud-1.2.0.1.3.zip', canary.filename
+    # The fork's 1.3.2 updater downloads the same notarized app under the old name.
+    refute ReleaseMetadata::SELF_SIGNED_COPY
+    assert_nil stable.self_signed_filename
+    assert_equal 'gksdud-1.2.0-macos-universal.zip', stable.legacy_filename
+    assert_nil canary.self_signed_filename
+    assert_nil pre.self_signed_filename
+    # One app for every channel.
+    assert_equal %w[gksdud gksdud gksdud], [stable, pre, canary].map(&:app)
+    assert_equal ['io.gksdud.inputswitch'], [stable, pre, canary].map(&:identifier).uniq
+    assert_equal 3, [stable, pre, canary].map(&:asset_version).uniq.length
   end
 
   def with_release_repository
@@ -49,13 +68,63 @@ class ReleaseTests < Minitest::Test
   end
 
   def test_pushed_tags_must_match_source_version
-    with_release_repository do |selection, _, _|
-      %w[v1.2.0 pre-v1.2.0 pre-v.1.2.0].each do |tag|
-        result = selection.resolve(event: 'push', tag: tag, version: '', source: '', summary: '')
-        assert_equal '1.2.0', result.fetch(:version)
-        assert_equal tag.start_with?('pre-v'), result.fetch(:prerelease)
+    with_release_repository do |selection, command, _|
+      # Only a prerelease goes out from its tag; stable releases are manual and canary ones come from main.
+      %w[v1.2.0 v1.2.0.0.1 pre-v1.2.0.1 canary-v1.2.0.0.1].each do |tag|
+        error = assert_raises(RuntimeError) { selection.resolve(event: 'push', tag: tag, version: '', source: '', summary: '') }
+        assert_includes error.message, 'Only a prerelease'
       end
-      assert_raises(ArgumentError) { selection.resolve(event: 'push', tag: 'v9.0.0', version: '', source: '', summary: '') }
+      # A prerelease's version is its tag's, after the source's stable version, which must be out already.
+      error = assert_raises(RuntimeError) { selection.resolve(event: 'push', tag: 'v1.2.0.1', version: '', source: '', summary: '') }
+      assert_match 'v1.2.0 does not exist', error.message
+      command.call('git', 'tag', 'v1.2.0')
+      result = selection.resolve(event: 'push', tag: 'v1.2.0.1', version: '', source: '', summary: '')
+      assert_equal ['1.2.0.1', 'v1.2.0.1', 'pre', true], result.values_at(:version, :tag, :channel, :prerelease)
+      assert_raises(ArgumentError) { selection.resolve(event: 'push', tag: 'v1.2.0.0', version: '', source: '', summary: '') }
+      # A manual release is stable.
+      %w[1.3.0.1 1.3.0.0.1].each do |version|
+        assert_raises(ArgumentError) { selection.resolve(event: 'workflow_dispatch', tag: '', version: version, source: 'main', summary: 'Fix input') }
+      end
+    end
+  end
+
+  def test_a_push_to_main_numbers_its_canary_after_the_latest_prerelease_or_stable_release
+    with_release_repository do |selection, git, dir|
+      push = { event: 'push', tag: 'main', version: '', source: '', summary: '', branch: true }
+      commit = ->(subject) { git.call('git', 'commit', '--allow-empty', '-m', subject) }
+      commit.call('Second')
+      error = assert_raises(RuntimeError) { selection.resolve(**push) }
+      assert_includes error.message, 'No prerelease or stable release tag'
+      git.call('git', 'tag', 'v1.2.0', 'HEAD~1')
+      git.call('git', 'tag', 'v1.1.9', 'HEAD~1')
+      git.call('git', 'tag', 'pre-v1.5.0.1')
+      commit.call('Change')
+      result = selection.resolve(**push)
+      assert_equal ['1.2.0.0.2', 'v1.2.0.0.2', 'canary', true], result.values_at(:version, :tag, :channel, :prerelease)
+      assert_equal git.call('git', 'rev-parse', 'HEAD'), result.fetch(:source_sha)
+      assert_equal 'gksdud-1.2.0.0.2.zip', result.fetch(:filename)
+      # A prerelease, or a stable release, of the same commit leaves the number of a rerun alone.
+      git.call('git', 'tag', '-a', '-m', 'Prerelease', 'v1.2.0.1')
+      assert_equal '1.2.0.0.2', selection.resolve(**push).fetch(:version)
+      commit.call('After the prerelease')
+      assert_equal '1.2.0.1.1', selection.resolve(**push).fetch(:version)
+      # A prerelease off this branch is not before the commit.
+      git.call('git', 'tag', 'v1.2.0.9', git.call('git', 'commit-tree', '-m', 'Elsewhere', 'HEAD^{tree}'))
+      git.call('git', 'tag', 'v1.2.0.1.1', 'HEAD')
+      commit.call('Next')
+      assert_equal '1.2.0.1.2', selection.resolve(**push).fetch(:version)
+      git.call('git', 'tag', 'v1.2.1', 'HEAD~1')
+      assert_equal '1.2.1.0.1', selection.resolve(**push).fetch(:version)
+      # A prerelease pushed before its stable release is refused and does not count.
+      git.call('git', 'tag', 'v1.3.0.1', 'HEAD~1')
+      assert_equal '1.2.1.0.1', selection.resolve(**push).fetch(:version)
+      git.call('git', 'tag', 'v1.3.0', 'HEAD~1')
+      assert_equal '1.3.0.1.1', selection.resolve(**push).fetch(:version)
+      # A local build numbers itself the same way.
+      FileUtils.cp("#{ROOT}/build.sh", "#{dir}/build.sh")
+      script = File.read("#{ROOT}/build.sh")[/^if \[\[ \$channel != stable.*?^fi$/m]
+      output, = Open3.capture2e({ 'channel' => 'dev' }, '/bin/bash', '-c', "set -euo pipefail\n#{script}\necho \"$GKSDUD_APP_VERSION\"", chdir: dir)
+      assert_equal '1.3.0.1.1', output.strip
     end
   end
 
@@ -107,7 +176,8 @@ class ReleaseTests < Minitest::Test
     end
   end
 
-  def publication_result(draft: true, prerelease: false, actual_tag: 'v1.2.0', summary: 'Input fixes', view_exit: 0, edit_exit: 0)
+  # Exercise manual publication against a fake gh; nothing reaches GitHub.
+  def publication_result(draft: true, prerelease: false, actual_tag: 'v1.2.0', summary: 'Input fixes', warning: '', latest: 'true', view_exit: 0, edit_exit: 0)
     Dir.mktmpdir('gksdud-publish-test-') do |dir|
       File.write("#{dir}/gh", <<~RUBY)
         #!/usr/bin/ruby
@@ -121,7 +191,7 @@ class ReleaseTests < Minitest::Test
         exit ENV.fetch('EDIT_EXIT').to_i
       RUBY
       File.chmod(0755, "#{dir}/gh")
-      env = { 'PATH' => "#{dir}:#{ENV.fetch('PATH')}", 'RELEASE_SUMMARY' => summary,
+      env = { 'PATH' => "#{dir}:#{ENV.fetch('PATH')}", 'RELEASE_SUMMARY' => summary, 'RELEASE_WARNING' => warning, 'MAKE_LATEST' => latest,
               'RELEASE_JSON' => JSON.generate(tagName: actual_tag, isDraft: draft, isPrerelease: prerelease),
               'CAPTURE' => "#{dir}/args.json", 'NOTES' => "#{dir}/notes.md",
               'VIEW_EXIT' => view_exit.to_s, 'EDIT_EXIT' => edit_exit.to_s }
@@ -141,8 +211,20 @@ class ReleaseTests < Minitest::Test
     assert_equal 9, args.length
     assert_includes notes, summary
     refute_includes notes, '<!-- 게시 전'
-    assert_includes notes, 'Developer ID로 서명하고 Apple 공증을 받은 빌드입니다.'
-    refute_includes notes, 'brew install --cask codingnoye/tap/gksdud'
+    assert_includes notes, 'Developer ID'
+    refute_includes notes, '### 경고'
+  end
+
+  def test_publish_can_leave_the_latest_release_alone
+    status, args, _, output = publication_result(latest: 'false')
+    assert status.success?, output
+    assert_equal ['--draft=false', '--latest=false'], args.last(2)
+  end
+
+  def test_publish_adds_the_warning_section_after_the_summary
+    status, _, notes, output = publication_result(summary: '- 서명 변경', warning: " - 손쉬운 사용 권한을 다시 허용\n")
+    assert status.success?, output
+    assert_includes notes, "### 요약\n\n- 서명 변경\n\n### 경고\n\n- 손쉬운 사용 권한을 다시 허용\n\n### 설치"
   end
 
   def test_published_release_is_not_edited_on_retry

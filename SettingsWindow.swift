@@ -4,7 +4,7 @@ import ServiceManagement
 extension AppDelegate {
     func buildWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 384, height: 636), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "gksdud"; window.isReleasedWhenClosed = false
+        window.title = BuildKind.current.displayName; window.isReleasedWhenClosed = false
         window.delegate = self; window.hidesOnDeactivate = false; window.center()
         let content = window.contentView!
         func column() -> NSStackView {
@@ -26,24 +26,26 @@ extension AppDelegate {
         testInput.cell?.isScrollable = true; testInput.cell?.wraps = false
         testInput.usesSingleLineMode = true; testInput.lineBreakMode = .byClipping
         testInput.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        // Otherwise AppKit may focus a selectable hint label first.
+        window.initialFirstResponder = testInput
         let inputRow = NSStackView(views: [inputBadge, testInput]); inputRow.spacing = 12; inputRow.alignment = .centerY
         full(inputRow, in: root)
         testInput.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -48).isActive = true
         let host = NSView(); full(host, in: root)
-        for _ in 0..<4 {
+        for _ in 0..<5 {
             let panel = column(); host.addSubview(panel)
             NSLayoutConstraint.activate([panel.leadingAnchor.constraint(equalTo: host.leadingAnchor), panel.trailingAnchor.constraint(equalTo: host.trailingAnchor), panel.bottomAnchor.constraint(lessThanOrEqualTo: host.bottomAnchor),
-                tabPanels.count == 3 ? panel.centerYAnchor.constraint(equalTo: host.centerYAnchor) : panel.topAnchor.constraint(equalTo: host.topAnchor)])
+                tabPanels.count == 4 ? panel.centerYAnchor.constraint(equalTo: host.centerYAnchor) : panel.topAnchor.constraint(equalTo: host.topAnchor)])
             tabPanels.append(panel)
         }
         let tabs = NSStackView(); tabs.distribution = .fillEqually; tabs.spacing = 8
         tabs.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(tabs)
-        for (index, title) in ["일반", "대소문자", "특수문자", "gksdud"].enumerated() {
+        for (index, title) in ["일반", "대소문자", "특수문자", "추가기능", BuildKind.current.displayName].enumerated() {
             let button = NSButton(title: title, target: self, action: #selector(changeTab(_:)))
             button.tag = index; button.setButtonType(.toggle); button.bezelStyle = .regularSquare
             button.isBordered = false; button.imagePosition = .imageAbove; button.imageScaling = .scaleProportionallyDown
             button.font = .systemFont(ofSize: 10)
-            button.image = index == 0 ? sourceMenuIcon(korean: true) : tabGlyph(["", "Aa", "⌥", "?"][index])
+            button.image = index == 0 ? sourceMenuIcon(korean: true) : tabGlyph(["", "Aa", "⌥", "+", "?"][index])
             button.setAccessibilityLabel(title + " 탭")
             tabs.addArrangedSubview(button); tabButtons.append(button)
         }
@@ -67,9 +69,11 @@ extension AppDelegate {
             tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -5),
             tabs.heightAnchor.constraint(equalToConstant: 42)
         ])
-        func hint(_ text: String, in panel: NSStackView, indent: CGFloat = 20) {
+        // `dims`: dimmed with the settings that need Accessibility.
+        func hint(_ text: String, in panel: NSStackView, indent: CGFloat = 20, dims: Bool = true) {
             let label = NSTextField(wrappingLabelWithString: text)
             label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor
+            if dims { settingLabels.append((label, .secondaryLabelColor)) }
             label.translatesAutoresizingMaskIntoConstraints = false
             let container = NSView(); container.addSubview(label)
             if let last = panel.arrangedSubviews.last { panel.setCustomSpacing(6, after: last) }
@@ -77,12 +81,36 @@ extension AppDelegate {
             NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: indent), label.trailingAnchor.constraint(equalTo: container.trailingAnchor), label.topAnchor.constraint(equalTo: container.topAnchor), label.bottomAnchor.constraint(equalTo: container.bottomAnchor)])
         }
         func separator(in panel: NSStackView) { let line = NSBox(); line.boxType = .separator; full(line, in: panel) }
+        func heading(_ text: String, in panel: NSStackView, dims: Bool = true) {
+            let label = NSTextField(labelWithString: text); label.font = .systemFont(ofSize: 13, weight: .semibold)
+            panel.addArrangedSubview(label)
+            if dims { settingLabels.append((label, .labelColor)) }
+        }
         func row(_ title: String, _ views: [NSView], in panel: NSStackView) {
             let label = NSTextField(labelWithString: title); label.widthAnchor.constraint(equalToConstant: 95).isActive = true
+            settingLabels.append((label, .labelColor))
             let row = NSStackView(views: [label] + views); row.spacing = 16; row.alignment = .centerY
             panel.addArrangedSubview(row)
         }
-        let general = tabPanels[0]
+        // Permission, activation and login first, without a title; then the keys and the menu bar. Fewer rows than the
+        // other tabs, so they get more room.
+        let general = tabPanels[0]; general.spacing = 18
+        func section(_ title: String) {
+            general.setCustomSpacing(28, after: general.arrangedSubviews.last!); separator(in: general)
+            general.setCustomSpacing(28, after: general.arrangedSubviews.last!); heading(title, in: general)
+        }
+        // Under 메뉴바에 표시, and only with it.
+        func indented(_ button: NSButton) {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            let row = NSView(); row.addSubview(button)
+            NSLayoutConstraint.activate([button.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 20),
+                button.topAnchor.constraint(equalTo: row.topAnchor), button.bottomAnchor.constraint(equalTo: row.bottomAnchor)])
+            full(row, in: general)
+        }
+        pressAccess.target = self; pressAccess.action = #selector(requestPressAccess); pressAccess.bezelStyle = .rounded
+        pressAccessRequired.font = .systemFont(ofSize: 11); pressAccessRequired.textColor = .systemOrange
+        let accessRow = NSStackView(views: [pressAccess, pressAccessRequired]); accessRow.spacing = 8; accessRow.alignment = .centerY
+        general.addArrangedSubview(accessRow)
         enabled.target = self; enabled.action = #selector(toggleEnabled); enabled.state = engine.active ? .on : .off
         keyboardWarning.font = .systemFont(ofSize: 11); keyboardWarning.textColor = .systemOrange
         let warningIcon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "경고")!)
@@ -93,29 +121,29 @@ extension AppDelegate {
         let activation = NSStackView(views: [enabled, keyboardWarningRow])
         activation.orientation = .vertical; activation.alignment = .leading; activation.spacing = 6
         full(activation, in: general); keyboardWarningRow.isHidden = true
-        pressSwitch.target = self; pressSwitch.action = #selector(togglePressSwitch)
-        pressAccess.target = self; pressAccess.action = #selector(requestPressAccess); pressAccess.bezelStyle = .rounded
-        let pressRow = NSStackView(views: [pressSwitch, pressAccess]); pressRow.spacing = 16; pressRow.alignment = .centerY
-        general.addArrangedSubview(pressRow)
-        hint("버튼을 뗄 때가 아닌 누를 때 전환하도록 해 더 빠르게 전환합니다.\n글자 씹힘도 더 개선됩니다.", in: general)
-        separator(in: general)
-        picker.addItems(withTitles: ["우측 Command ⌘", "우측 Option ⌥", "Caps Lock ⇪", "우측 Control ⌃"])
-        picker.selectItem(at: sources.firstIndex(of: engine.source) ?? 0)
-        picker.target = self; picker.action = #selector(selectionChanged)
-        row("한영 키", [picker], in: general)
-        targetPicker.addItems(withTitles: targets.map(\.name)); targetPicker.selectItem(withTitle: engine.target.name)
-        targetPicker.target = self; targetPicker.action = #selector(selectionChanged)
-        row("내부 전환 키", [targetPicker], in: general)
-        hint("시스템의 '이전 입력 소스 선택' 단축키의 값을 변경합니다.\n다른 앱과 겹치지 않는, 기능 없는 키를 골라주세요.", in: general)
-        let keyboards = NSButton(title: "대상 키보드 설정", target: self, action: #selector(showKeyboardSettings)); keyboards.bezelStyle = .rounded
-        general.addArrangedSubview(keyboards)
-        separator(in: general)
         login.target = self; login.action = #selector(toggleLogin)
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        general.addArrangedSubview(login)
+        section("한영 키")
+        picker.show(engine.defaultSources)
+        picker.onChange = { [weak self] _ in self?.selectionChanged() }
+        let keyboards = advancedButton; keyboards.target = self; keyboards.action = #selector(showKeyboardSettings); keyboards.bezelStyle = .rounded
+        let keysRow = NSStackView(views: [picker, keyboards]); keysRow.spacing = 8; keysRow.alignment = .centerY
+        general.addArrangedSubview(keysRow)
+        section("메뉴바")
         showInMenuBar.target = self; showInMenuBar.action = #selector(toggleHidden)
         showInMenuBar.state = engine.defaults.bool(forKey: "hidden") ? .off : .on
-        general.addArrangedSubview(login); general.addArrangedSubview(showInMenuBar)
-        hint("기존 메뉴바 입력기를 대체합니다.\n⌘+드래그로 위치를 옮길 수 있어요.", in: general)
+        general.addArrangedSubview(showInMenuBar)
+        hint("⌘+드래그로 위치를 옮길 수 있어요.", in: general)
+        replaceInputMenu.target = self; replaceInputMenu.action = #selector(toggleReplaceInputMenu)
+        general.setCustomSpacing(12, after: general.arrangedSubviews.last!); indented(replaceInputMenu)
+        iconCaseSwitch.target = self; iconCaseSwitch.action = #selector(toggleIconCase)
+        iconCaseSwitch.state = engine.defaults.bool(forKey: "iconCase") ? .on : .off
+        general.setCustomSpacing(12, after: general.arrangedSubviews.last!); indented(iconCaseSwitch)
+        updateBadgeSwitch.target = self; updateBadgeSwitch.action = #selector(toggleUpdateBadge)
+        updateBadgeSwitch.state = showsUpdateBadge ? .on : .off
+        general.setCustomSpacing(12, after: general.arrangedSubviews.last!); indented(updateBadgeSwitch)
+        general.setCustomSpacing(24, after: general.arrangedSubviews.last!)
         iconPicker.addItems(withTitles: ["한 / dud", "한 / A", "KO / EN", "ㅎuㅎ / dud"])
         iconPicker.selectItem(at: iconStyle); iconPicker.target = self; iconPicker.action = #selector(changeIconStyle)
         iconPicker.setAccessibilityLabel("메뉴바 아이콘 조합")
@@ -125,27 +153,56 @@ extension AppDelegate {
         }
         koreanPreview.setAccessibilityLabel("한국어 아이콘 미리보기")
         englishPreview.setAccessibilityLabel("영어 아이콘 미리보기")
-        row("메뉴바 아이콘", [iconPicker, koreanPreview, englishPreview], in: general)
+        row("아이콘", [iconPicker, koreanPreview, englishPreview], in: general)
+        // Shown in the advanced settings sheet.
+        targetPicker.addItems(withTitles: switchTargets.map(\.name)); targetPicker.selectItem(withTitle: engine.target.name)
+        targetPicker.target = self; targetPicker.action = #selector(selectionChanged)
         let caps = tabPanels[1]
-        longPressSwitch.target = self; longPressSwitch.action = #selector(toggleLongPress)
-        preserveCapsSwitch.target = self; preserveCapsSwitch.action = #selector(togglePreserveCaps)
+        heading("대소문자", in: caps)
+        longPressSwitch.target = self; longPressSwitch.action = #selector(toggleFeature(_:))
+        preserveCapsSwitch.target = self; preserveCapsSwitch.action = #selector(toggleFeature(_:))
         caps.addArrangedSubview(longPressSwitch)
         hint("누른 즉시 한영 전환, 길게 유지시 대소문자 전환", in: caps)
         caps.addArrangedSubview(preserveCapsSwitch)
+        koreanCapsSwitch.target = self; koreanCapsSwitch.action = #selector(toggleFeature(_:))
+        caps.addArrangedSubview(koreanCapsSwitch)
         let symbols = tabPanels[2]
+        heading("특수문자", in: symbols)
         for (index, title) in ["영어처럼 특수문자 입력", "Option 문자 입력 차단"].enumerated() {
             let button = NSButton(checkboxWithTitle: title, target: self, action: #selector(changeSpecialMode(_:)))
             button.tag = index + 1; specialButtons.append(button); symbols.addArrangedSubview(button)
             hint(index == 0 ? "한글 상태에서도 ⌥8 → • 처럼 입력합니다." : "⌥+문자를 일반 문자로 입력합니다.", in: symbols)
         }
+        backquoteSwitch.target = self; backquoteSwitch.action = #selector(toggleFeature(_:))
+        symbols.addArrangedSubview(backquoteSwitch)
+        hint("한글 상태에서도 영어처럼 ₩ 대신 `를 입력하고, ⌥+₩로 ₩를 입력합니다.", in: symbols)
         specialStatus.font = .systemFont(ofSize: 11); specialStatus.textColor = .secondaryLabelColor
         full(specialStatus, in: symbols)
-        let about = tabPanels[3]; about.alignment = .centerX; about.spacing = 18
+        let extras = tabPanels[3]
+        heading("입력 소스 관리", in: extras)
+        addedSources.install(in: extras)
+        separator(in: extras)
+        heading("기타", in: extras)
+        escapeSwitch.target = self; escapeSwitch.action = #selector(toggleFeature(_:))
+        extras.addArrangedSubview(escapeSwitch)
+        universalControlSwitch.target = self; universalControlSwitch.action = #selector(toggleFeature(_:))
+        extras.addArrangedSubview(universalControlSwitch)
+        hint("유니버설 컨트롤로 사용시 전환이 잘 안된다면, 원격 기기에서 켜 주세요.", in: extras)
+        separator(in: extras)
+        // Installing needs no Accessibility, so this section never dims.
+        heading("CLI", in: extras, dims: false)
+        installCLI.target = self; installCLI.action = #selector(toggleCLI); installCLI.bezelStyle = .rounded
+        let cliHelp = NSButton(title: "사용법", target: self, action: #selector(openCLIHelp)); cliHelp.bezelStyle = .rounded
+        let cliRow = NSStackView(views: [installCLI, cliHelp]); cliRow.spacing = 8
+        extras.addArrangedSubview(cliRow)
+        hint("터미널, Hammerspoon 등에서 gksdud 명령으로 설정을 바꿀 수 있어요.", in: extras, indent: 0, dims: false)
+        refreshCLIButton()
+        let about = tabPanels[4]; about.alignment = .centerX; about.spacing = 18
         let appIcon = NSImageView(image: NSApp.applicationIconImage)
         appIcon.widthAnchor.constraint(equalToConstant: 72).isActive = true
         appIcon.heightAnchor.constraint(equalToConstant: 72).isActive = true
         about.addArrangedSubview(appIcon)
-        let name = NSTextField(labelWithString: "gksdud"); name.font = .systemFont(ofSize: 20, weight: .semibold)
+        let name = NSTextField(labelWithString: BuildKind.current.displayName); name.font = .systemFont(ofSize: 20, weight: .semibold)
         about.setCustomSpacing(12, after: appIcon); about.addArrangedSubview(name)
         updateHeading.font = .systemFont(ofSize: 12); updateHeading.textColor = .secondaryLabelColor; updateHeading.alignment = .center
         about.setCustomSpacing(4, after: name); full(updateHeading, in: about)
@@ -159,22 +216,30 @@ extension AppDelegate {
         updateScroll.documentView = updateSummary; full(updateScroll, in: about)
         updateButton.target = self; updateButton.action = #selector(performUpdate); updateButton.bezelStyle = .rounded
         checkUpdateButton.target = self; checkUpdateButton.action = #selector(checkForUpdates); checkUpdateButton.bezelStyle = .rounded
-        let actions = NSStackView(views: [updateButton, checkUpdateButton]); actions.spacing = 10; about.addArrangedSubview(actions)
+        channelPicker.addItems(withTitles: UpdateChannel.allCases.map(\.title))
+        channelPicker.target = self; channelPicker.action = #selector(changeUpdateChannel)
+        channelPicker.setAccessibilityLabel("업데이트 채널")
+        let actions = NSStackView(views: [updateButton, checkUpdateButton, channelPicker]); actions.spacing = 10; about.addArrangedSubview(actions)
         updateStatus.font = .systemFont(ofSize: 11); updateStatus.textColor = .secondaryLabelColor; updateStatus.alignment = .center
         about.setCustomSpacing(8, after: actions); full(updateStatus, in: about)
         about.setCustomSpacing(28, after: updateStatus)
-        let project = NSButton(title: "GitHub", target: self, action: #selector(openProject)); project.bezelStyle = .rounded
-        if let url = Bundle.main.url(forResource: "github", withExtension: "svg"), let image = NSImage(contentsOf: url) {
-            image.size = NSSize(width: 16, height: 16); image.isTemplate = true
-            project.image = image; project.imagePosition = .imageLeading
+        func link(_ title: String, icon: String, template: Bool = true, action: Selector) -> NSButton {
+            let button = NSButton(title: title, target: self, action: action); button.bezelStyle = .rounded
+            if let url = Bundle.main.url(forResource: icon, withExtension: "svg"), let image = NSImage(contentsOf: url) {
+                image.size = NSSize(width: 16, height: 16 * image.size.height / image.size.width); image.isTemplate = template
+                button.image = image; button.imagePosition = .imageLeading
+            }
+            return button
         }
-        let support = NSButton(title: "후원", target: self, action: #selector(openSupport)); support.bezelStyle = .rounded
-        support.isHidden = supportURL == nil
-        about.addArrangedSubview(NSStackView(views: [project, support]))
-        let credit = NSTextField(labelWithString: "© 2026 CodingNoye · codingnoye@gmail.com")
-        credit.font = .systemFont(ofSize: 10); credit.textColor = .secondaryLabelColor
-        about.addArrangedSubview(credit)
-        selectTab(0); updatePressAccess(); refreshSpecialMode(); refreshUpdates(); refreshIconPreviews(); refreshKeyboardState(); updateInputIndicator()
+        let project = link("GitHub", icon: "github", action: #selector(openProject)); about.addArrangedSubview(project)
+        about.setCustomSpacing(28, after: project); separator(in: about)
+        let supportTitle = NSTextField(labelWithString: "후원하기"); supportTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        about.setCustomSpacing(20, after: about.arrangedSubviews.last!); about.addArrangedSubview(supportTitle)
+        let supportNote = NSTextField(wrappingLabelWithString: "후원해주시면 큰 힘이 됩니다!")
+        supportNote.font = .systemFont(ofSize: 11); supportNote.textColor = .secondaryLabelColor; supportNote.alignment = .center
+        about.setCustomSpacing(6, after: supportTitle); about.addArrangedSubview(supportNote)
+        about.setCustomSpacing(12, after: supportNote); about.addArrangedSubview(link("Fairy", icon: "fairy", template: false, action: #selector(openSupport)))
+        selectTab(0); updatePressAccess(); refreshSpecialMode(); refreshUpdates(); refreshKeyboardState(); updateInputIndicator()
     }
     func tabGlyph(_ text: String) -> NSImage {
         let image = NSImage(size: NSSize(width: 24, height: 20), flipped: false) { rect in
@@ -205,42 +270,76 @@ extension AppDelegate {
         selectedTab = index
         for (i, panel) in tabPanels.enumerated() {
             panel.isHidden = i != index; tabButtons[i].state = i == index ? .on : .off
-            tabButtons[i].contentTintColor = i == index || (i == 3 && updates.available != nil) ? .controlAccentColor : .secondaryLabelColor
+            tabButtons[i].contentTintColor = i == index || (i == tabPanels.count - 1 && updates.available != nil) ? .controlAccentColor : .secondaryLabelColor
         }
     }
-    @objc func showAbout() { showSettings(); selectTab(3) }
+    @objc func showAbout() { showSettings(); selectTab(tabPanels.count - 1) }
     @objc func checkForUpdates() { installer.clearStatus(); updates.check(force: true) }
-    @objc func performUpdate() { if let release = updates.available { installer.start(release) } }
+    @objc func changeUpdateChannel() {
+        guard UpdateChannel.allCases.indices.contains(channelPicker.indexOfSelectedItem) else { return }
+        installer.clearStatus(); updates.select(UpdateChannel.allCases[channelPicker.indexOfSelectedItem])
+    }
+    @objc func performUpdate() {
+        guard let release = updates.available else { return }
+        // The warnings of every version the update installs, such as permissions to allow again, are read first.
+        let warnings = updates.warnings
+        if !warnings.isEmpty {
+            let alert = NSAlert(); alert.alertStyle = .warning
+            alert.messageText = "업데이트 전에 확인해주세요"; alert.accessoryView = linkedLabel(warnings, width: 222)
+            alert.addButton(withTitle: "업데이트 설치"); alert.addButton(withTitle: "취소")
+            guard runAlert(alert) == .alertFirstButtonReturn, updates.available?.tag_name == release.tag_name else { return }
+        }
+        installer.start(release)
+    }
     func installPreparedUpdate(_ prepared: PreparedUpdate) {
         do {
             guard !engine.isUpdatingSettings else { throw UpdateFailure("설정을 적용하고 있습니다. 잠시 후 다시 시도해주세요.") }
             optionInput.cancel()
-            try engine.prepareForExit()
+            try engine.restoreSystem()
             try UpdateInstaller.launchHelper(prepared)
             preparedToRelaunch = true; stopKeyTap(); timer?.invalidate(); updateTimer?.invalidate()
             NSApp.terminate(nil)
         } catch {
             try? FileManager.default.removeItem(at: prepared.directory)
-            installer.fail(error); repair()
+            installer.fail(error)
+            do { try engine.resume() } catch { report(error) }
+            repair()
         }
     }
-    var supportURL: URL? {
-        guard let value = Bundle.main.object(forInfoDictionaryKey: "GKSDUDSupportURL") as? String,
-              let url = URL(string: value), url.scheme == "https", url.host != nil,
-              url.user == nil, url.password == nil else { return nil }
-        return url
+    // Release notes text whose links open in the browser.
+    func linkedText(_ text: String, size: CGFloat) -> NSAttributedString {
+        let (plain, links) = AppRelease.links(text)
+        // Korean wraps between words, as in labels.
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakStrategy = .standard
+        let result = NSMutableAttributedString(string: plain, attributes: [.font: NSFont.systemFont(ofSize: size), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph])
+        for link in links { result.addAttribute(.link, value: link.url, range: link.range) }
+        return result
     }
-    @objc func openSupport() { if let url = supportURL { NSWorkspace.shared.open(url) } }
+    // An alert's text that can hold links, which its informative text cannot.
+    func linkedLabel(_ text: String, width: CGFloat) -> NSTextView {
+        let view = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+        view.isEditable = false; view.isSelectable = true; view.drawsBackground = false
+        view.textContainerInset = .zero; view.textContainer?.lineFragmentPadding = 3  // lines up with the alert's title
+        view.textStorage?.setAttributedString(linkedText(text, size: NSFont.systemFontSize))
+        view.layoutManager?.ensureLayout(for: view.textContainer!)
+        view.frame.size.height = ceil(view.layoutManager!.usedRect(for: view.textContainer!).height)
+        return view
+    }
+    @objc func openSupport() { NSWorkspace.shared.open(URL(string: "https://fairy.hada.io/@gksdud")!) }
     @objc func openProject() { NSWorkspace.shared.open(URL(string: "https://github.com/CenoX/gksdud")!) }
     func refreshUpdates() {
         let release = updates.available
         tabButtons.last?.image = release == nil ? tabGlyph("?") : updateGlyph(NSSize(width: 24, height: 20), color: .controlAccentColor)
         selectTab(selectedTab)
-        tabButtons.last?.setAccessibilityLabel(release == nil ? "gksdud 탭" : "gksdud 탭, 업데이트 가능")
-        for entry in item?.menu?.items ?? [] where entry.action == #selector(showAbout) { entry.isHidden = release == nil }
+        tabButtons.last?.setAccessibilityLabel(release == nil ? "\(BuildKind.current.displayName) 탭" : "\(BuildKind.current.displayName) 탭, 업데이트 가능")
+        for entry in item?.menu?.items ?? [] where entry.action == #selector(showAbout) { entry.isHidden = updates.announced == nil }
+        let arrow = showsUpdateBadge && updates.announced != nil
+        if updateArrow != arrow { updateArrow = arrow; showIndicator() }
+        channelPicker.selectItem(at: UpdateChannel.allCases.firstIndex(of: updates.channel) ?? 0)
+        channelPicker.isEnabled = !installer.busy
         let latest = release.map { " → v\($0.versionString)" } ?? ""
         updateHeading.stringValue = "v\(updates.installedVersion)\(latest)"
-        updateSummary.string = release?.summary ?? ""
+        updateSummary.textStorage?.setAttributedString(linkedText(updates.summary, size: 12))
         updateScroll.isHidden = release == nil
         updateButton.isHidden = release == nil
         updateButton.isEnabled = !installer.busy

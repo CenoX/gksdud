@@ -1,116 +1,154 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-mode=${GKSDUD_SIGN_MODE:-auto}
-sign_args=()
-if [[ "$mode" == auto || "$mode" == developer-id ]]; then
-  if [[ -z "${GKSDUD_SIGN_IDENTITY:-}" ]]; then
-    identities=$(security find-identity -v -p codesigning) || {
-      echo 'Unable to read code signing identities from the keychain.' >&2
-      exit 1
-    }
-    fingerprints=()
-    identity_names=()
-    identity_pattern='^[[:space:]]*[0-9]+\)[[:space:]]+([A-Fa-f0-9]{40})[[:space:]]+"(Developer ID Application: [^"]+)"$'
-    while IFS= read -r line; do
-      if [[ "$line" =~ $identity_pattern ]]; then
-        fingerprints+=("${BASH_REMATCH[1]}")
-        identity_names+=("${BASH_REMATCH[2]}")
-      fi
-    done <<< "$identities"
-    case ${#fingerprints[@]} in
-      0)
-        if [[ "$mode" == auto && -f signing/local-certificate.pem ]]; then
-          mode=local
-        else
-          echo 'No valid Developer ID Application identity found. Set GKSDUD_SIGN_IDENTITY to your certificate name or SHA-1, or use GKSDUD_SIGN_MODE=local / ad-hoc.' >&2
-          exit 1
-        fi
-        ;;
-      1) GKSDUD_SIGN_IDENTITY=${fingerprints[0]} ;;
-      *)
-        echo 'Multiple Developer ID Application identities found. Set GKSDUD_SIGN_IDENTITY to the certificate name or SHA-1 to use:' >&2
-        for ((i=0; i<${#fingerprints[@]}; i++)); do
-          printf '  %s  "%s"\n' "${fingerprints[i]}" "${identity_names[i]}" >&2
-        done
-        exit 1
-        ;;
-    esac
-  fi
-  [[ "$mode" != auto ]] || mode=developer-id
+team=$(tr -d '\n\r' < signing/developer-team-id)
+# The team's Developer ID signs releases; a Mac without it in the keychain falls back to the self-signed identity.
+developer_id() {
+  security find-identity -v -p codesigning | sed -n -E "s/^ *[0-9]+\) ([0-9A-F]{40}) \"Developer ID Application: .* \($team\)\"$/\1/p" | head -1 || true
+}
+mode=${GKSDUD_SIGN_MODE:-$([[ -n $(developer_id) ]] && echo developer-id || echo local)}
+# One app for every build; the app shows gksdud-DEV for a local build and gksdud-CAN for a canary release.
+# Stable is for the stable and prerelease releases.
+channel=${GKSDUD_CHANNEL:-dev}
+[[ $channel =~ ^(dev|canary|stable)$ ]] || { echo 'GKSDUD_CHANNEL must be dev, canary or stable' >&2; exit 1; }
+app=gksdud identifier=io.gksdud.inputswitch
+# A local build numbers itself like the canary of its commit (scripts/resolve-release.rb): the highest prerelease or stable
+# version before the commit, in four fields, and the commits since it.
+if [[ $channel != stable && -z ${GKSDUD_APP_VERSION:-} ]]; then
+  # A prerelease tag counts only with its stable release, as one pushed before it is refused.
+  base=$({ git tag --list 'v[0-9]*' 2>/dev/null | sed 's/^/known /'; git tag --list 'v[0-9]*' --merged HEAD^ 2>/dev/null; } |
+    awk '$1 == "known" { known[$2] = 1; next }
+         /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print substr($0, 2) ".0", $0 }
+         /^v[0-9]+\.[0-9]+\.[0-9]+\.[1-9][0-9]*$/ { stable = $0; sub(/\.[0-9]+$/, "", stable); if (stable in known) print substr($0, 2), $0 }' |
+    sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -1 || true)
+  if [[ -n $base ]] && count=$(git rev-list --count "${base#* }..HEAD" 2>/dev/null); then GKSDUD_APP_VERSION=${base%% *}.$count; fi
 fi
+notarize=${GKSDUD_NOTARIZE:-$([[ -n ${GKSDUD_NOTARY_PROFILE:-}${GKSDUD_NOTARY_KEY:-} ]] && echo 1 || echo 0)}
+[[ $notarize == 0 || $notarize == 1 ]] || { echo 'GKSDUD_NOTARIZE must be 0 or 1' >&2; exit 1; }
+notary=()
+if [[ $notarize == 1 ]]; then
+GKSDUD_NOTARY_PROFILE=${GKSDUD_NOTARY_PROFILE:-$([[ -z ${GKSDUD_NOTARY_KEY:-} ]] && echo gksdud || true)}
+if [[ -n "${GKSDUD_NOTARY_PROFILE:-}" ]]; then
+  notary=(--keychain-profile "$GKSDUD_NOTARY_PROFILE")
+elif [[ -n "${GKSDUD_NOTARY_KEY:-}" ]]; then
+  notary=(--key "$GKSDUD_NOTARY_KEY" --key-id "${GKSDUD_NOTARY_KEY_ID:?Set the App Store Connect API key ID}" --issuer "${GKSDUD_NOTARY_ISSUER:?Set the App Store Connect issuer ID}")
+fi
+if [[ -n ${GKSDUD_NOTARY_KEYCHAIN:-} ]]; then notary+=(--keychain "$GKSDUD_NOTARY_KEYCHAIN"); fi
+fi
+sign_args=()
 case "$mode" in
   local)
     [[ -f signing/local-certificate.pem ]] || { echo 'Missing fixed signing certificate. Run signing/setup-local-signing.sh first.' >&2; exit 1; }
     fingerprint=$(openssl x509 -in signing/local-certificate.pem -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')
     [[ "$fingerprint" =~ ^[A-Fa-f0-9]{40}$ ]] || exit 1
-    sign_args=(--sign "$fingerprint" --timestamp=none --requirements "=designated => identifier \"io.gksdud.inputswitch\" and certificate leaf = H\"$fingerprint\"")
+    sign_args=(--sign "$fingerprint" --timestamp=none)
     ;;
   developer-id)
-    : "${GKSDUD_SIGN_IDENTITY:?Set Developer ID Application signing identity}"
-    sign_args=(--sign "$GKSDUD_SIGN_IDENTITY" --timestamp)
+    identity=${GKSDUD_SIGN_IDENTITY:-$(developer_id)}
+    [[ -n "$identity" ]] || { echo "No Developer ID Application identity of team $team. Set GKSDUD_SIGN_IDENTITY." >&2; exit 1; }
+    # Notarization needs a secure timestamp; other builds skip the network call.
+    timestamp=--timestamp=none
+    [[ ${#notary[@]} -eq 0 ]] || timestamp=--timestamp
+    sign_args=(--sign "$identity" "$timestamp")
     ;;
   ad-hoc)
     echo 'WARNING: ad-hoc signing does not preserve app identity across updates.' >&2
     sign_args=(--sign - --timestamp=none)
     ;;
-  *) echo 'GKSDUD_SIGN_MODE must be auto, local, developer-id, or ad-hoc' >&2; exit 1 ;;
+  *) echo 'GKSDUD_SIGN_MODE must be local, developer-id, or ad-hoc' >&2; exit 1 ;;
 esac
-printf 'Signing mode: %s; identity: %s\n' "$mode" "${sign_args[1]}"
-notarize=${GKSDUD_NOTARIZE:-0}
-case "$notarize" in
-  0) ;;
-  1)
-    [[ "$mode" == developer-id ]] || { echo 'Notarization requires Developer ID signing.' >&2; exit 1; }
-    notary_args=(--keychain-profile "${GKSDUD_NOTARY_PROFILE:-gksdud}")
-    if [[ -n "${GKSDUD_NOTARY_KEYCHAIN:-}" ]]; then
-      notary_args+=(--keychain "$GKSDUD_NOTARY_KEYCHAIN")
-    fi
-    xcrun notarytool history "${notary_args[@]}" --output-format json >/dev/null
-    ;;
-  *) echo 'GKSDUD_NOTARIZE must be 0 or 1' >&2; exit 1 ;;
-esac
+[[ ${#notary[@]} -eq 0 || $mode == developer-id ]] || { echo 'Notarization requires Developer ID signing.' >&2; exit 1; }
+if [[ ${#notary[@]} -gt 0 ]]; then xcrun notarytool history "${notary[@]}" --output-format json >/dev/null; fi
+# Apps up to 1.7.1 install only updates signed with the self-signed certificate, which they find by the old archive name.
+# While they move to Developer ID, GKSDUD_SELF_SIGNED_COPY also writes the same app signed that way under that name.
+if [[ -n ${GKSDUD_SELF_SIGNED_COPY:-} ]]; then
+  [[ $mode == developer-id && -f signing/local-certificate.pem ]] ||
+    { echo 'The self-signed copy needs GKSDUD_SIGN_MODE=developer-id and signing/local-certificate.pem.' >&2; exit 1; }
+  self_signed=$(openssl x509 -in signing/local-certificate.pem -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')
+fi
+# The command-line tool inside is signed before the app, with an identifier of its own.
+sign() {
+  local requirement=()
+  if [[ $mode == local ]]; then
+    requirement=(--requirements "=designated => identifier \"$2\" and certificate leaf = H\"$fingerprint\"")
+  fi
+  codesign --force "${sign_args[@]}" ${requirement[@]+"${requirement[@]}"} --identifier "$2" --options runtime "$1"
+}
 output_dir=${GKSDUD_OUTPUT_DIR:-"$PWD/outputs"}
 stage=$(mktemp -d /private/tmp/gksdud-build.XXXXXX)
-mkdir -p "$stage/gksdud.app/Contents/MacOS" "$stage/gksdud.app/Contents/Resources" "$output_dir"
+mkdir -p "$stage/$app.app/Contents/MacOS" "$stage/$app.app/Contents/Helpers" "$stage/$app.app/Contents/Resources" "$output_dir"
 swiftc -parse-as-library -D ICON_GENERATOR -module-cache-path "$stage/module-cache" DudIcon.swift -o "$stage/icon-generator"
 "$stage/icon-generator" "$stage/AppIcon.iconset"
-iconutil -c icns "$stage/AppIcon.iconset" -o "$stage/gksdud.app/Contents/Resources/AppIcon.icns"
+iconutil -c icns "$stage/AppIcon.iconset" -o "$stage/$app.app/Contents/Resources/AppIcon.icns"
+sources=(main.swift DudIcon.swift KeyboardManagement.swift KeyboardSettings.swift SettingsWindow.swift InputSources.swift UpdateChecking.swift UpdateInstaller.swift SpecialCharacters.swift CLI.swift CLIServer.swift UniversalControl.swift KeyboardTests.swift FeatureTests.swift CLITests.swift SelfTest.swift)
+cli_sources=(CLI.swift CLITool.swift)
+compile() { swiftc -swift-version 5 -O -module-cache-path "$stage/module-cache" -import-objc-header Bridge.h "${sources[@]}" -framework AppKit -framework IOKit -framework ServiceManagement "$@"; }
 for arch in arm64 x86_64; do
-  swiftc -swift-version 5 -O -target "$arch-apple-macos13.0" -module-cache-path "$stage/module-cache" -import-objc-header Bridge.h main.swift DudIcon.swift KeyboardManagement.swift KeyboardSettings.swift KeyboardTests.swift SettingsWindow.swift UpdateChecking.swift UpdateInstaller.swift SpecialCharacters.swift FeatureTests.swift -o "$stage/gksdud-$arch" -framework AppKit -framework IOKit -framework ServiceManagement
+  compile -target "$arch-apple-macos13.0" -o "$stage/gksdud-$arch"
+  swiftc -swift-version 5 -O -parse-as-library -module-cache-path "$stage/module-cache" "${cli_sources[@]}" -target "$arch-apple-macos13.0" -o "$stage/cli-$arch"
 done
-lipo -create "$stage/gksdud-arm64" "$stage/gksdud-x86_64" -output "$stage/gksdud.app/Contents/MacOS/gksdud"
-cp Info.plist "$stage/gksdud.app/Contents/Info.plist"
-cp LICENSE "$stage/gksdud.app/Contents/Resources/LICENSE"
-cp Resources/github.svg Resources/OCTICONS-LICENSE "$stage/gksdud.app/Contents/Resources/"
+lipo -create "$stage/gksdud-arm64" "$stage/gksdud-x86_64" -output "$stage/$app.app/Contents/MacOS/gksdud"
+lipo -create "$stage/cli-arm64" "$stage/cli-x86_64" -output "$stage/$app.app/Contents/Helpers/gksdud"
+cp Info.plist "$stage/$app.app/Contents/Info.plist"
+[[ $channel == stable ]] || /usr/libexec/PlistBuddy -c "Add :GKSDUDChannel string $channel" "$stage/$app.app/Contents/Info.plist"
+cp LICENSE "$stage/$app.app/Contents/Resources/LICENSE"
+cp Resources/github.svg Resources/fairy.svg Resources/OCTICONS-LICENSE "$stage/$app.app/Contents/Resources/"
 if [[ -n "${GKSDUD_APP_VERSION:-}" ]]; then
-  [[ "$GKSDUD_APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $GKSDUD_APP_VERSION" "$stage/gksdud.app/Contents/Info.plist"
+  [[ "$GKSDUD_APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+){0,2}$ ]] || exit 1
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $GKSDUD_APP_VERSION" "$stage/$app.app/Contents/Info.plist"
 fi
 if [[ -n "${GKSDUD_BUILD_NUMBER:-}" ]]; then
   [[ "$GKSDUD_BUILD_NUMBER" =~ ^[0-9]+$ ]] || exit 1
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GKSDUD_BUILD_NUMBER" "$stage/gksdud.app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GKSDUD_BUILD_NUMBER" "$stage/$app.app/Contents/Info.plist"
 fi
-codesign --force "${sign_args[@]}" --options runtime "$stage/gksdud.app"
-codesign --verify --deep --strict "$stage/gksdud.app"
-"$stage/gksdud.app/Contents/MacOS/gksdud" --self-test
-version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$stage/gksdud.app/Contents/Info.plist")
-if [[ "$notarize" == 1 ]]; then
-  ditto -c -k --keepParent --norsrc "$stage/gksdud.app" "$stage/notarization.zip"
-  echo 'Submitting app to Apple for notarization...'
-  if ! xcrun notarytool submit "$stage/notarization.zip" "${notary_args[@]}" --wait --timeout 20m --output-format json > "$stage/notarization.json"; then
-    echo "Notarization failed. Submission receipt: $stage/notarization.json" >&2
+sign "$stage/$app.app/Contents/Helpers/gksdud" "$identifier.cli"
+sign "$stage/$app.app" "$identifier"
+codesign --verify --deep --strict "$stage/$app.app"
+# The release app has no test code; the same bundle with the test modes compiled in (-D TESTS) runs them.
+test_app="$stage/test/$app.app"
+ditto "$stage/$app.app" "$test_app"
+compile -D TESTS -target "$(uname -m)-apple-macos13.0" -o "$test_app/Contents/MacOS/gksdud"
+sign "$test_app" "$identifier"
+"$test_app/Contents/MacOS/gksdud" --self-test
+# The command-line tool answers help without the app, and refuses wrong arguments before asking it.
+"$stage/$app.app/Contents/Helpers/gksdud" help settings >/dev/null
+if "$stage/$app.app/Contents/Helpers/gksdud" set no-such=on 2>/dev/null; then exit 1; else test $? -eq 2; fi
+if [[ -n ${self_signed:-} ]]; then
+  copy="$stage/self-signed/$app.app"
+  mkdir "$stage/self-signed"; ditto "$stage/$app.app" "$copy"
+  sign_self_signed() {
+    codesign --force --sign "$self_signed" --timestamp=none --identifier "$2" --options runtime \
+      --requirements "=designated => identifier \"$2\" and certificate leaf = H\"$self_signed\"" "$1"
+  }
+  sign_self_signed "$copy/Contents/Helpers/gksdud" "$identifier.cli"
+  sign_self_signed "$copy" "$identifier"
+  codesign --verify --deep --strict "$copy"
+fi
+if [[ ${#notary[@]} -gt 0 ]]; then
+  ditto -c -k --keepParent --norsrc "$stage/$app.app" "$stage/notarize.zip"
+  if ! xcrun notarytool submit "$stage/notarize.zip" "${notary[@]}" --wait --timeout 30m --output-format json > "$stage/notarization.json"; then
+    echo "Notarization submission failed. Receipt: $stage/notarization.json" >&2
     exit 1
   fi
-  status=$(/usr/bin/plutil -extract status raw -o - "$stage/notarization.json")
-  [[ "$status" == Accepted ]] || { echo "Notarization status: $status. Submission receipt: $stage/notarization.json" >&2; exit 1; }
-  xcrun stapler staple "$stage/gksdud.app"
-  xcrun stapler validate "$stage/gksdud.app"
-  codesign --verify --all-architectures --strict "$stage/gksdud.app"
-  spctl --assess --type execute --verbose=2 "$stage/gksdud.app"
+  result=$(cat "$stage/notarization.json")
+  if [[ $(plutil -extract status raw - <<<"$result" 2>/dev/null) != Accepted ]]; then
+    echo "Notarization failed: $result" >&2
+    id=$(plutil -extract id raw - <<<"$result" 2>/dev/null) && xcrun notarytool log "$id" "${notary[@]}" >&2 || true
+    exit 1
+  fi
+  xcrun stapler staple "$stage/$app.app"
+  xcrun stapler validate "$stage/$app.app"
+  codesign --verify --deep --all-architectures --strict "$stage/$app.app"
+  spctl --assess --type execute -vv "$stage/$app.app"
 fi
-# Repack after stapling; publish only a completely verified archive.
-ditto -c -k --keepParent --norsrc "$stage/gksdud.app" "$stage/distribution.zip"
-mv "$stage/distribution.zip" "$output_dir/gksdud-$version-macos-universal.zip"
-codesign -d -r- "$stage/gksdud.app"
-echo "Built app: $stage/gksdud.app"
+version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$stage/$app.app/Contents/Info.plist")
+ditto -c -k --keepParent --norsrc "$stage/$app.app" "$stage/distribution.zip"
+mv "$stage/distribution.zip" "$output_dir/$app-$version.zip"
+# Keep the notarized Developer ID archive available to the fork's 1.3.2 updater.
+if [[ $channel == stable && $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  cp "$output_dir/$app-$version.zip" "$output_dir/$app-$version-macos-universal.zip"
+fi
+[[ -z ${copy:-} ]] || ditto -c -k --keepParent --norsrc "$copy" "$output_dir/$app-$version-macos-universal.zip"
+codesign -d -r- "$stage/$app.app"
+echo "Built app: $stage/$app.app"
+echo "Test app: $test_app"

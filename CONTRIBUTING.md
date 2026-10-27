@@ -17,7 +17,7 @@ Xcode Command Line Tools가 설치된 macOS에서 빌드합니다. Xcode 프로�
 bash build.sh
 ```
 
-기본 `auto` 모드는 키체인의 유효한 `Developer ID Application` 인증서가 하나이면 자동으로 사용합니다. 여러 개이면 인증서 이름 또는 SHA-1을 지정해야 합니다. 다른 코드 서명 인증서도 직접 지정할 수 있습니다.
+기본 모드는 `signing/developer-team-id`에 지정된 팀의 Developer ID를 사용하고, 없으면 자체 서명으로 빌드합니다. 인증서 이름이나 SHA-1은 `GKSDUD_SIGN_IDENTITY`로 지정할 수 있습니다. 일반 빌드는 개발 채널이며 배포 시 `GKSDUD_CHANNEL=stable`을 지정합니다.
 
 ```sh
 GKSDUD_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' bash build.sh
@@ -37,7 +37,7 @@ GKSDUD_SIGN_MODE=ad-hoc bash build.sh
 
 ```sh
 xcrun notarytool store-credentials gksdud
-GKSDUD_NOTARIZE=1 bash build.sh
+GKSDUD_CHANNEL=stable GKSDUD_NOTARIZE=1 bash build.sh
 ```
 
 빌드와 자체 테스트를 통과한 앱을 Apple에 제출하고, 승인된 공증 티켓을 앱에 붙인 뒤 ZIP을 다시 만듭니다. 티켓과 Gatekeeper 검증이 실패하면 배포 ZIP을 만들지 않습니다. 기본 개발 빌드에는 공증을 요청하지 않습니다.
@@ -53,7 +53,7 @@ GKSDUD_NOTARIZE=1 bash build.sh
 - 자체 테스트는 가짜 장치 공급자를 사용해 실행 후 장치 추가, 연결 ID 교체, 처리 도중 제거, 기본값과 On/Default/Off 우선순위, 연결 해제·앱 재시작 후 설정 보존, 일부 장치 실패, 3회 연속 실패 경고와 복구, 쓰기 후 검증 실패 시 복원을 검사합니다. 실제 HID 매핑을 변경하지 않습니다.
 - 단축키 저장소를 대체한 테스트로 macOS 함수키 플래그 정규화 후 복원, 비활성·미설정 원본, 사용자 변경 보존, 대상 키 변경, 기존 버전 백업 및 복원 재시도를 확인합니다. 실제 시스템 단축키와 `activateSettings`는 호출하지 않습니다.
 - 실제 `Timer`와 `Process.waitUntilExit()`를 함께 실행해 활성화 도중 자동 복원이 끼어들지 않는지, 비활성화 중 복원이 중복 실행되지 않는지, 실패 후 점검이 재개되는지 검사합니다. 대기용 `/bin/sleep`만 실행하며 실제 단축키는 변경하지 않습니다.
-- 빌드한 실행 파일의 `--render-keyboard-ui /private/tmp/gksdud-ui`는 가짜 장치로 설정 창과 목록을 밝은/어두운 모드 PNG로 저장하고, 기본값·키보드별 선택 버튼과 경고 해제를 검사합니다. 테스트 창을 잠깐 표시하며 실제 HID 매핑이나 시스템 단축키는 변경하지 않습니다.
+- 빌드가 출력한 `Test app` 실행 파일의 `--render-keyboard-ui /private/tmp/gksdud-ui`는 가짜 장치로 설정 창과 목록을 밝은/어두운 모드 PNG로 저장하고, 기본값·키보드별 선택 버튼과 경고 해제를 검사합니다. 테스트 창을 잠깐 표시하며 실제 HID 매핑이나 시스템 단축키는 변경하지 않습니다.
 - 실제 입력 검증에서는 Karabiner 가상 키보드 재생성, USB/Bluetooth 재연결, 로그인 및 잠자기 복귀 후 자동 적용을 확인합니다. Karabiner의 외부 키보드 연결 시 내장 키보드 비활성화도 유지되어야 합니다.
 - 기본값 Off인 상태에서 새 키보드가 적용되지 않는지, 개별 On은 적용되는지 확인합니다. 개별 Off는 gksdud가 적용한 매핑만 원복하며 원래 다른 앱이 설정한 매핑은 보존해야 합니다.
 - 연결 해제한 키보드는 회색 이름으로 남고 선택을 바꿀 수 있어야 합니다. 재연결 시 저장한 선택이 적용되어야 합니다.
@@ -67,26 +67,26 @@ GKSDUD_NOTARIZE=1 bash build.sh
 
 | 태그 예시 | 종류 | 다운로드 파일 |
 | --- | --- | --- |
-| `v1.2.0` | 정식 릴리즈 | `gksdud-1.2.0-macos-universal.zip` |
-| `pre-v1.2.0` | 프리릴리즈 | `gksdud-1.2.0-pre-macos-universal.zip` |
+| `v1.2.0` | 정식 릴리즈 | `gksdud-1.2.0.zip` |
+| `v1.2.0.1` | 프리릴리즈 | `gksdud-1.2.0.1.zip` |
 
-둘 다 같은 Developer ID로 서명하고 공증한 Intel·Apple Silicon용 앱과 체크섬을 사용합니다. 프리릴리즈는 앱의 정식 업데이트에서 제외됩니다. 이 포크에서는 원본의 Homebrew tap을 갱신하지 않습니다.
+둘 다 같은 Developer ID로 서명하고 공증한 Intel·Apple Silicon용 앱과 체크섬을 사용합니다. 프리릴리즈는 앱의 정식 채널에서 제외되며, 프리릴리즈 채널로 받을 수 있습니다. 정식 릴리즈는 1.3.2 업데이트 호환용 `-macos-universal.zip`도 같은 공증 앱으로 배포합니다. 이 포크에서는 원본의 Homebrew tap을 갱신하지 않습니다.
 
-배포 전 검증은 다음 명령으로 실행합니다. `GKSDUD_RELEASE_TEAM_ID`에는 서명 인증서의 팀 ID를 지정해주세요.
+배포 전 검증은 다음 명령으로 실행합니다. 서명 팀은 `signing/developer-team-id`로 검증합니다.
 
 ```sh
-GKSDUD_RELEASE_TEAM_ID=YOUR_TEAM_ID ruby scripts/prepare-release.rb CenoX/gksdud
+ruby scripts/prepare-release.rb CenoX/gksdud
 ```
 
 검증한 ZIP과 생성된 `SHA256SUMS`를 해당 태그의 GitHub 릴리즈에 직접 첨부합니다. 정식 버전은 최신 릴리즈로, 테스트 버전은 프리릴리즈로 표시합니다.
 
-기존 `pre-v.1.2.0` 형식도 호환성을 위해 지원합니다.
+프리릴리즈는 정식 버전 뒤에 네 번째 숫자를 붙이며, 카나리아는 다섯 번째 숫자를 사용합니다. 이 포크는 카나리아를 자동 발행하지 않습니다.
 
 예를 들어 앱 버전이 `1.2.0`인 커밋에서 프리릴리즈를 만들려면:
 
 ```sh
-git tag pre-v1.2.0
-git push origin pre-v1.2.0
+git tag v1.2.0.1
+git push origin v1.2.0.1
 ```
 
 이미 공개한 태그나 파일은 덮어쓰지 않습니다. 수정한 테스트 버전을 추가 배포하려면 앱 버전과 태그를 함께 올립니다.
@@ -97,11 +97,7 @@ git push origin pre-v1.2.0
 
 GitHub Releases에서 릴리즈 초안을 만들고 본문 상단에 해당 버전의 변경 내용을 작성한 뒤, 배포 파일과 체크섬을 첨부해 게시합니다. 템플릿 수정은 이미 생성된 릴리즈 본문에 반영되지 않습니다.
 
-`CHANGELOG.md`에는 저장소의 버전별 변경 이력을 유지합니다.
-
-## 관련 문서
-
-- [변경 기록](CHANGELOG.md)
+버전별 변경 이력은 GitHub 릴리즈에 기록합니다.
 
 ### 대소문자 보존 수동 검증
 

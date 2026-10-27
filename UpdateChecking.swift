@@ -2,14 +2,51 @@ import Foundation
 
 struct ReleaseVersion: Comparable {
     let parts: [Int]
+    let fields: Int
     init?(_ text: String) {
         let value = text.hasPrefix("v") ? String(text.dropFirst()) : text
         let fields = value.split(separator: ".", omittingEmptySubsequences: false)
-        guard (2...4).contains(fields.count), fields.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }),
+        guard (2...5).contains(fields.count), fields.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }),
               fields.allSatisfy({ Int($0) != nil }) else { return nil }
-        parts = fields.map { Int($0)! } + Array(repeating: 0, count: 4 - fields.count)
+        parts = fields.map { Int($0)! } + Array(repeating: 0, count: 5 - fields.count)
+        self.fields = fields.count
     }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.parts == rhs.parts }
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.parts.lexicographicallyPrecedes(rhs.parts) }
+    // The fields tell the channel. Prereleases number a fourth field on the stable release they follow, canary releases a fifth
+    // on the prerelease or stable release before them: 2.3.0 < 2.3.0.1 < 2.3.0.1.4 < 2.3.0.2 < 2.3.0.2.1 < 2.3.1 < 2.3.1.0.1.
+    // Apps up to 2.0.1 read at most four fields and no prerelease without its pre- tag, so they see only stable releases.
+    var channel: UpdateChannel { fields == 5 ? .canary : fields == 4 ? .prerelease : .stable }
+}
+
+// What this build is: a local build, a canary that every merge to main publishes, or a prerelease or stable release
+// published by hand. They are the same app; only the name it shows tells them apart.
+enum BuildKind {
+    case dev, canary, prerelease, stable
+    static let current = BuildKind(channel: Bundle.main.object(forInfoDictionaryKey: "GKSDUDChannel") as? String,
+                                   version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+    init(channel: String?, version: String?) {
+        switch channel {
+        case "dev": self = .dev
+        case "canary": self = .canary
+        default: self = version.flatMap(ReleaseVersion.init)?.channel == .prerelease ? .prerelease : .stable
+        }
+    }
+    // The name macOS shows, in System Settings and for the command-line tool.
+    static let appName = "gksdud"
+    var displayName: String { self == .dev ? "gksdud-DEV" : self == .canary ? "gksdud-CAN" : Self.appName }
+    // The update channel until one is chosen; a local build counts as canary.
+    var channel: UpdateChannel { self == .stable ? .stable : self == .prerelease ? .prerelease : .canary }
+}
+
+// The releases that update the app, chosen in the gksdud tab. Canary takes only canary releases, stable only stable ones, and
+// prerelease both prereleases and stable releases.
+enum UpdateChannel: String, CaseIterable {
+    case stable, prerelease, canary
+    var title: String { self == .stable ? "정식 릴리즈" : self == .prerelease ? "프리릴리즈" : "카나리아" }
+    func takes(_ release: UpdateChannel) -> Bool { self == .prerelease ? release != .canary : release == self }
+    // What the menu bar shows: canary releases on canary, stable releases otherwise.
+    func announces(_ release: UpdateChannel) -> Bool { release == (self == .canary ? .canary : .stable) }
 }
 
 struct AppRelease: Codable {
@@ -26,16 +63,29 @@ struct AppRelease: Codable {
               url.path.hasPrefix("/CenoX/gksdud/releases/tag/") else { return nil }
         return url
     }
+    // Every release is tagged v and its version; the fields of the version tell its channel.
+    var channel: UpdateChannel? { tag_name.hasPrefix("v") ? ReleaseVersion(versionString)?.channel : nil }
     var versionString: String { tag_name.hasPrefix("v") ? String(tag_name.dropFirst()) : tag_name }
-    var archiveName: String { "gksdud-\(versionString)-macos-universal.zip" }
-    var eligible: Bool { !draft && !prerelease && pageURL != nil && ReleaseVersion(versionString) != nil }
+    // The Apple-signed gksdud-<version>.zip when the release has one, so this app moves to it on its next update; otherwise the
+    // self-signed -macos-universal.zip, the only name apps up to 1.7.1 take.
+    var appleSigned: Bool { assets?.contains { $0.name == "\(archiveBase).zip" } == true }
+    var archiveName: String { appleSigned ? "\(archiveBase).zip" : "\(archiveBase)-macos-universal.zip" }
+    private var archiveBase: String { "\(BuildKind.appName)-\(versionString)" }
+    // Canary releases and prereleases are GitHub prereleases, so Homebrew never sees them; their last field counts from 1.
+    var eligible: Bool {
+        guard !draft, let channel, pageURL != nil, let version = ReleaseVersion(versionString) else { return false }
+        return prerelease == (channel != .stable) && (channel == .stable || version.parts[version.fields - 1] != 0)
+    }
     func isNewer(than installed: String) -> Bool {
-        guard eligible,
-              let candidate = ReleaseVersion(versionString), let current = ReleaseVersion(installed) else { return false }
+        guard eligible, let candidate = ReleaseVersion(versionString), let current = ReleaseVersion(installed) else { return false }
         return candidate > current
     }
-    var summary: String {
-        // Only the explicitly named section is shown; installation instructions stay on GitHub.
+    // A self-signed app (what apps up to 1.7.1 update to) also moves to the Apple-signed build of the version it already runs.
+    func updates(_ installed: String, developerID: Bool) -> Bool {
+        isNewer(than: installed) || !developerID && eligible && appleSigned && ReleaseVersion(versionString) == ReleaseVersion(installed)
+    }
+    // The text under a heading such as ### 요약 or **경고**; the other sections, such as installation, stay on GitHub.
+    func section(_ name: String) -> String {
         var collecting = false, level = 0, fenced = false
         var lines: [String] = []
         let cleaned = (body ?? "").replacingOccurrences(of: "<!--(?s:.*?)-->", with: "", options: .regularExpression)
@@ -46,16 +96,69 @@ struct AppRelease: Codable {
             if !fenced {
                 let depth = trimmed.prefix(while: { $0 == "#" }).count
                 let heading = String(trimmed.dropFirst(depth)).trimmingCharacters(in: .whitespaces)
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "#* "))
-                if !collecting, (depth > 0 || trimmed == "**요약**"), heading == "요약" {
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "#*[] "))
+                if !collecting, depth > 0 || trimmed.hasPrefix("**") && trimmed.hasSuffix("**"), heading == name {
                     collecting = true; level = depth; continue
                 }
                 if collecting, depth > 0, level == 0 || depth <= level { break }
             }
             if collecting { lines.append(line) }
         }
-        let result = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return result.isEmpty ? "이번 버전의 요약은 릴리스 페이지에서 확인할 수 있습니다." : String(result.prefix(4000))
+        return String(lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
+    }
+    var summary: String {
+        let text = section("요약")
+        return text.isEmpty ? "이번 버전의 요약은 릴리스 페이지에서 확인할 수 있습니다." : text
+    }
+    // What to know before installing this version, shown for confirmation before an update installs it.
+    var warning: String { section("경고") }
+    var summaryItems: [String] { Self.items(summary) }
+    // A canary's summary lists its commits, one a line: the hash linked to the commit, then the title, whose own links are
+    // left as text.
+    var commits: [String] {
+        let lines = section("요약").components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return ["v\(versionString)"] }
+        return lines.map { line in
+            let item = ["- ", "* ", "+ "].contains(where: line.hasPrefix) ? String(line.dropFirst(2)) : line
+            let hash = item.range(of: "^\\[[0-9a-f]{4,40}\\]\\(https://github\\.com/CenoX/gksdud/commit/[0-9a-f]{4,40}\\)", options: .regularExpression)
+            let title = String(item[(hash?.upperBound ?? item.startIndex)...])
+                .replacingOccurrences(of: "\\[([^\\[\\]\\n]+)\\]\\((https?://[^)\\s]*)\\)", with: "$1", options: .regularExpression)
+            return (hash.map { String(item[$0]) } ?? "") + title
+        }
+    }
+    var warningItems: [String] { Self.items(warning) }
+    // Every line as a "* " item, keeping its indentation.
+    static func items(_ text: String) -> [String] {
+        text.components(separatedBy: "\n").compactMap { line in
+            let text = line.trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return nil }
+            let marker = ["- ", "* ", "+ "].contains { text.hasPrefix($0) }
+            return String(line.prefix(while: { $0 == " " || $0 == "\t" })) + "* " + (marker ? String(text.dropFirst(2)) : text)
+        }
+    }
+    // The text with each [label](https://…) written as its label, and where those and bare web addresses link to.
+    static func links(_ text: String) -> (text: String, links: [(range: NSRange, url: URL)]) {
+        let address = "https?://[A-Za-z0-9._~:/?#@!$&'*+,;=%-]+"
+        let source = text as NSString, plain = NSMutableString()
+        var links: [(range: NSRange, url: URL)] = [], last = 0
+        let written = try! NSRegularExpression(pattern: "\\[([^\\[\\]\\n]+)\\]\\((\(address))\\)")
+        for match in written.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            plain.append(source.substring(with: NSRange(location: last, length: match.range.location - last)))
+            let label = source.substring(with: match.range(at: 1))
+            if let url = URL(string: source.substring(with: match.range(at: 2))), url.host != nil {
+                links.append((NSRange(location: plain.length, length: (label as NSString).length), url))
+            }
+            plain.append(label); last = NSMaxRange(match.range)
+        }
+        plain.append(source.substring(from: last))
+        // A bare address ends before the punctuation that closes its sentence, or the marks that make it bold.
+        for match in try! NSRegularExpression(pattern: address).matches(in: plain as String, range: NSRange(location: 0, length: plain.length))
+        where !links.contains(where: { NSIntersectionRange($0.range, match.range).length > 0 }) {
+            var range = match.range
+            while range.length > 0, ".,;:!?'*".contains(plain.substring(with: NSRange(location: NSMaxRange(range) - 1, length: 1))) { range.length -= 1 }
+            if let url = URL(string: plain.substring(with: range)), url.host != nil { links.append((range, url)) }
+        }
+        return (plain as String, links.sorted { $0.range.location < $1.range.location })
     }
 }
 
@@ -63,21 +166,63 @@ final class UpdateChecker {
     typealias Fetch = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void
     let defaults: UserDefaults
     let installedVersion: String
+    private(set) var channel: UpdateChannel
+    let developerID: Bool
+    let build: BuildKind
     let fetch: Fetch
     var now: () -> Date
     var onChange: (() -> Void)?
-    private(set) var release: AppRelease?
+    // Releases of every channel newer than the installed version at the last check, newest first. Apps up to 2.0.1 kept only
+    // their own channel's under updates.releases.
+    private(set) var releases: [AppRelease] = []
     private(set) var checking = false
     private(set) var error: String?
-    var available: AppRelease? { release.flatMap { $0.isNewer(than: installedVersion) ? $0 : nil } }
+    // A local build numbers itself like the canary of its commit, which is not an update for it even signed by Apple.
+    private var takesSameVersion: Bool { !developerID && build != .dev }
+    var pending: [AppRelease] { releases.filter { $0.channel.map(channel.takes) == true && $0.updates(installedVersion, developerID: !takesSameVersion) } }
+    var available: AppRelease? { pending.first }
+    // The update the menu bar shows: on prerelease, only a stable release.
+    var announced: AppRelease? { pending.first { $0.channel.map(channel.announces) == true } }
+    // On canary, the commits of every canary the update installs, each its hash, linked to the commit, and its title.
+    var summary: String {
+        guard channel == .canary else { return Self.merge(pending.map { ($0, $0.summaryItems) }) }
+        return pending.flatMap(\.commits).joined(separator: "\n")
+    }
+    // The warnings of every version the update installs; empty when none has one.
+    var warnings: String { Self.merge(pending.map { ($0, $0.warningItems) }.filter { !$0.1.isEmpty }) }
+    // Each version's lines under its name, which links to its release page.
+    static func merge(_ versions: [(AppRelease, [String])]) -> String {
+        versions.map { release, lines in
+            let name = "v\(release.versionString)"
+            return ([release.pageURL.map { "[\(name)](\($0.absoluteString))" } ?? name] + lines).joined(separator: "\n")
+        }.joined(separator: "\n\n")
+    }
     var lastChecked: Date? { defaults.object(forKey: "updates.lastSuccess") as? Date }
 
     init(defaults: UserDefaults, installedVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0",
-         now: @escaping () -> Date = Date.init,
+         channel: UpdateChannel? = nil, build: BuildKind = .current, developerID: Bool = UpdateValidation.runsWithDeveloperID, now: @escaping () -> Date = Date.init,
          fetch: @escaping Fetch = { request, completion in URLSession.shared.dataTask(with: request, completionHandler: completion).resume() }) {
-        self.defaults = defaults; self.installedVersion = installedVersion; self.now = now; self.fetch = fetch
-        if let data = defaults.data(forKey: "updates.release") { release = try? JSONDecoder().decode(AppRelease.self, from: data) }
+        self.defaults = defaults; self.installedVersion = installedVersion; self.developerID = developerID; self.build = build
+        let saved = defaults.string(forKey: "updates.channel").flatMap(UpdateChannel.init)
+        self.channel = channel ?? saved ?? build.channel
+        self.now = now; self.fetch = fetch
+        // A prerelease or canary build stays on its channel even when it is later replaced by a stable release by hand or by
+        // an older updater. A local build only starts on canary.
+        if channel == nil, saved == nil, build == .prerelease || build == .canary { keepChannel() }
+        if let data = defaults.data(forKey: "updates.cache") { releases = (try? JSONDecoder().decode([AppRelease].self, from: data)) ?? [] }
+        else if let data = defaults.data(forKey: "updates.releases") {
+            // Until the first check, which comes at once, the releases of the channel an older app followed.
+            releases = (try? JSONDecoder().decode([AppRelease].self, from: data)) ?? []
+            defaults.set(now(), forKey: "updates.nextCheck")
+        }
     }
+    // Kept, also across updates: a prerelease that installs a stable release still takes the next prerelease.
+    func select(_ channel: UpdateChannel) {
+        guard channel != self.channel else { return }
+        self.channel = channel; keepChannel()
+        onChange?(); check(force: true)
+    }
+    func keepChannel() { defaults.set(channel.rawValue, forKey: "updates.channel") }
     func check(force: Bool = false) {
         guard !checking else { return }
         let date = now()
@@ -86,7 +231,9 @@ final class UpdateChecker {
         checking = true; error = nil
         defaults.set(date.addingTimeInterval(3600), forKey: "updates.nextCheck")
         onChange?()
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/CenoX/gksdud/releases/latest")!)
+        // Recent releases of every kind: an update can skip versions, and canary releases are never GitHub's latest. A hundred
+        // keep the versions an update installs, and their warnings, in reach behind many canary and prereleases.
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/CenoX/gksdud/releases?per_page=100")!)
         request.timeoutInterval = 20
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -97,10 +244,12 @@ final class UpdateChecker {
                 guard let self else { return }
                 self.checking = false
                 if failure == nil, let http = response as? HTTPURLResponse, http.statusCode == 200,
-                   let data, data.count <= 1_000_000,
-                   let value = try? JSONDecoder().decode(AppRelease.self, from: data), value.eligible {
-                    self.release = value
-                    self.defaults.set(try? JSONEncoder().encode(value), forKey: "updates.release")
+                   let data, data.count <= 4_000_000,
+                   let values = try? JSONDecoder().decode([AppRelease].self, from: data) {
+                    self.releases = values.filter { $0.updates(self.installedVersion, developerID: !self.takesSameVersion) }
+                        .sorted { ReleaseVersion($0.versionString)! > ReleaseVersion($1.versionString)! }
+                    self.defaults.set(try? JSONEncoder().encode(self.releases), forKey: "updates.cache")
+                    for key in ["updates.release", "updates.releases"] { self.defaults.removeObject(forKey: key) }
                     self.defaults.set(self.now(), forKey: "updates.lastSuccess")
                     self.defaults.set(self.now().addingTimeInterval(86400), forKey: "updates.nextCheck")
                 } else {

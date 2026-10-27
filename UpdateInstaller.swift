@@ -76,7 +76,8 @@ enum UpdateProcessLauncher {
 // The installer has no signing secrets and never modifies signature requirements.
 // A new bundle must satisfy the currently installed app's certificate-bound identity.
 enum UpdateValidation {
-    static let identifier = "io.gksdud.inputswitch"
+    static let identifier = Bundle.main.bundleIdentifier ?? "io.gksdud.inputswitch"
+    static let appFolder = BuildKind.appName + ".app"
     static let strict = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode)
     static func signedCode(_ path: URL) throws -> SecStaticCode {
         var code: SecStaticCode?
@@ -99,19 +100,78 @@ enum UpdateValidation {
               let requirement else { throw UpdateFailure("현재 앱의 서명 정보를 읽지 못했습니다.") }
         return requirement
     }
+    // Releases move from the self-signed certificate to Developer ID: an app on that certificate also accepts the team's signature.
+    static let legacy = requirement("identifier \"\(identifier)\" and certificate leaf = H\"f1a12a9906f72189094440f2eb8cf2aaa20765ea\"")
+    static let developerID = requirement("anchor apple generic and identifier \"\(identifier)\" and certificate 1[field.1.2.840.113635.100.6.2.6]"
+        + " and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = \"UP6EXS2HJJ\"")
+    static func requirement(_ text: String) -> SecRequirement? {
+        var value: SecRequirement?
+        return SecRequirementCreateWithString(text as CFString, SecCSFlags(rawValue: 0), &value) == errSecSuccess ? value : nil
+    }
+    static func movesToDeveloperID(_ installed: URL, _ new: SecStaticCode) throws -> Bool {
+        guard let legacy, let developerID else { return false }
+        let old = try signedCode(installed)
+        return SecStaticCodeCheckValidity(old, strict, legacy) == errSecSuccess && SecStaticCodeCheckValidity(new, strict, developerID) == errSecSuccess
+    }
+    static var runsWithDeveloperID: Bool {
+        var code: SecCode?
+        guard let developerID, SecCodeCopySelf(SecCSFlags(rawValue: 0), &code) == errSecSuccess, let code else { return false }
+        return SecCodeCheckValidity(code, SecCSFlags(rawValue: 0), developerID) == errSecSuccess
+    }
+    // A permission given to a self-signed build stays listed as allowed but no longer applies to the Developer ID build, and
+    // switching it off and on keeps the old certificate. A Developer ID launch after another build ran removes it, so that
+    // allowing again adds a new one: after the self-signed releases, and again after a rollback, a downgrade or a local build.
+    // One left behind could never be allowed again, so a failed removal is tried a few times, then again on every launch.
+    // Whether to ask for it again: on every launch until it is given.
+    static func forgetSelfSignedPermissions(defaults: UserDefaults, developerID: Bool = UpdateValidation.runsWithDeveloperID,
+                                            trusted: () -> Bool = { AXIsProcessTrusted() }, reset: (String) -> Bool = resetPermission) -> Bool {
+        // Whether the last launch was the Developer ID build.
+        let otherBuildRan = !defaults.bool(forKey: "permissions.developerID")
+        defaults.set(developerID, forKey: "permissions.developerID")
+        // Written by every launch since 1.1: a first installation has nothing to remove.
+        guard developerID, defaults.object(forKey: "updates.nextCheck") != nil else { return false }
+        let services = otherBuildRan ? ["Accessibility", "PostEvent"] : defaults.stringArray(forKey: "permissions.reset") ?? []
+        if !services.isEmpty { defaults.set(services.filter { !reset($0) }, forKey: "permissions.reset") }
+        // Asked even when the removal failed: allowing then takes effect once the next launch removes it. Whether it is allowed
+        // only once nothing is left to remove, as the answer to the old permission would stay.
+        let ask = services.contains("Accessibility") || defaults.bool(forKey: "permissions.ask") && !trusted()
+        defaults.set(ask, forKey: "permissions.ask")
+        return ask
+    }
+    // The record of the last launch can miss one, as when the settings were removed but not the permission, and the system
+    // prompt never replaces it. Asked while not allowed, there is nothing to lose: removed, allowing adds one for this build,
+    // and the running app takes it without a relaunch. One removed here is no longer left for the next launch to remove, as
+    // that would take away what is allowed now.
+    static func forgetUnusablePermissions(defaults: UserDefaults, trusted: () -> Bool = { AXIsProcessTrusted() },
+                                          reset: (String) -> Bool = resetPermission) {
+        guard !trusted() else { return }
+        let failed = ["Accessibility", "PostEvent"].filter { !reset($0) }
+        if let left = defaults.stringArray(forKey: "permissions.reset") { defaults.set(left.filter(failed.contains), forKey: "permissions.reset") }
+    }
+    static func resetPermission(_ service: String) -> Bool {
+        (0..<3).contains { attempt in
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.3) }
+            return (try? command("/usr/bin/tccutil", ["reset", service, identifier])) != nil
+        }
+    }
     static func candidate(_ new: URL, installed: URL, version: String) throws {
         let requirement = try installedRequirement(installed)
         let code = try signedCode(new)
-        guard SecStaticCodeCheckValidity(code, strict, requirement) == errSecSuccess else {
+        let moves = try movesToDeveloperID(installed, code)
+        guard try SecStaticCodeCheckValidity(code, strict, requirement) == errSecSuccess || moves else {
             throw UpdateFailure("현재 앱과 업데이트의 서명이 다릅니다. 기존 앱은 그대로 유지됩니다.")
         }
         guard let bundle = Bundle(url: new), bundle.bundleIdentifier == identifier,
               bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == version,
               let oldBundle = Bundle(url: installed), oldBundle.bundleIdentifier == identifier,
               let old = oldBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              let current = ReleaseVersion(old), let next = ReleaseVersion(version), next > current else {
+              let current = ReleaseVersion(old), let next = ReleaseVersion(version), accepts(next, over: current, movingToDeveloperID: moves) else {
             throw UpdateFailure("업데이트의 앱 이름 또는 버전이 올바르지 않습니다.")
         }
+    }
+    // Only the move to Developer ID installs the version already installed; anything else must be newer.
+    static func accepts(_ next: ReleaseVersion, over current: ReleaseVersion, movingToDeveloperID: Bool) -> Bool {
+        next > current || movingToDeveloperID && next == current
     }
     static func checksum(_ archive: URL, text: String, name: String) throws {
         let lines = text.split(whereSeparator: \.isNewline)
@@ -130,11 +190,11 @@ enum UpdateValidation {
         let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
         guard actual == matches[0] else { throw UpdateFailure("다운로드한 파일의 체크섬이 일치하지 않습니다. 다시 시도해주세요.") }
     }
-    static func archiveNames(_ names: String, listing: String) throws {
+    static func archiveNames(_ names: String, listing: String, app: String = appFolder) throws {
         let entries = names.split(separator: "\n", omittingEmptySubsequences: true)
         guard !entries.isEmpty, entries.count <= 5000,
               entries.allSatisfy({ name in
-                  (name == "gksdud.app/" || name.hasPrefix("gksdud.app/")) && !name.contains("\\")
+                  (name == "\(app)/" || name.hasPrefix("\(app)/")) && !name.contains("\\")
                       && !name.split(separator: "/").contains("..") && !name.contains("\r")
               }) else { throw UpdateFailure("업데이트 압축 파일의 경로가 올바르지 않습니다.") }
         // This app's archives contain only regular files/directories. Reject links
@@ -242,7 +302,7 @@ final class UpdateInstaller: @unchecked Sendable {
                 let expanded = directory.appendingPathComponent("expanded", isDirectory: true)
                 try FileManager.default.createDirectory(at: expanded, withIntermediateDirectories: false)
                 try UpdateValidation.command("/usr/bin/ditto", ["-x", "-k", archive.path, expanded.path])
-                let candidate = expanded.appendingPathComponent("gksdud.app", isDirectory: true)
+                let candidate = expanded.appendingPathComponent(UpdateValidation.appFolder, isDirectory: true)
                 try UpdateValidation.candidate(candidate, installed: installed, version: release.versionString)
                 let prepared = PreparedUpdate(directory: directory, candidate: candidate, version: release.versionString)
                 DispatchQueue.main.async {
@@ -279,7 +339,7 @@ final class UpdateInstaller: @unchecked Sendable {
         let installed = Bundle.main.bundleURL.resolvingSymlinksInPath()
         guard workspace.lastPathComponent.hasPrefix("gksdud-update-"),
               workspace.path == workspace.resolvingSymlinksInPath().path,
-              candidate.path == workspace.appendingPathComponent("expanded/gksdud.app").path,
+              candidate.path == workspace.appendingPathComponent("expanded/\(UpdateValidation.appFolder)").path,
               candidate.path == candidate.resolvingSymlinksInPath().path,
               installed.pathExtension == "app" else { throw UpdateFailure("잘못된 업데이트 경로입니다.") }
         defer { try? FileManager.default.removeItem(at: workspace) }
